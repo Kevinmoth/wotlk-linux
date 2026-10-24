@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, port/linux]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -30,6 +30,7 @@ jobs:
         run: |
           cmake -S . -B build/linux -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DWOWDECOMP_DISABLE_SIGNATURE_CHECKS=ON \
             -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" \
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG"
 
@@ -54,7 +55,7 @@ jobs:
           arch: x64
 
       - name: Configure
-        run: cmake -S . -B build/x64 -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DWOWDECOMP_DISABLE_SIGNATURE_CHECKS=ON
 
       - name: Build WowClient
         run: cmake --build build/x64 --target WowClient --parallel
@@ -91,10 +92,16 @@ jobs:
         run: |
           set -euo pipefail
           notes=$(cat <<'EOF' | sed 's/^          //'
-          **Experimental build.** Windows x64 and Linux x86_64. Each archive still needs a retail **WoW 3.3.5a (12340)** `Data` folder. Put it beside the client, or start with `-datadir /path/to/client`. `cameraFov` defaults to **100** (90°).
+          **Cliente 3.3.5a decompilado portado a Linux — build ALPHA para testers.**
 
-          | Archive | Platform |
-          |---------|----------|
+          Requisitos: tu propio cliente **WoW 3.3.5a (12340)**. Coloca su carpeta `Data` junto al binario, o arranca con `-datadir /ruta/al/cliente`. Apunta `Data/<locale>/realmlist.wtf` a tu servidor. Este build trae las verificaciones de firma desactivadas: la data moddeada de servidores privados (parches custom) carga tal cual.
+
+          Verificado por el mantenedor: login, mundo, cámara (click derecho + arrastre), redimensionado de ventana y conexión a servidor — bajo WSL/Dozen. **Linux nativo aún no ha sido verificado por nosotros: este alpha ES la prueba.** En nativo con drivers Vulkan reales se espera rendimiento de clase Windows; en WSL va degradado (~20 FPS, ver `docs/port/WSL_RUNBOOK.md` en el repo).
+
+          Incidencias conocidas en `docs/port/KNOWN_ISSUES_VULKAN.md`. Reporta bugs en los issues de este repositorio. Créditos: [SatyPardus/wowdecomp](https://github.com/SatyPardus/wowdecomp) (la decompilación) y [RosemyneH](https://github.com/RosemyneH) (gran parte del port).
+
+          | Archivo | Plataforma |
+          |---------|-----------|
           | `wowdecomp-linux-x86_64.tar.gz` | Linux x86_64 |
           | `wowdecomp-windows-x64.zip` | Windows x64 |
           EOF
