@@ -231,17 +231,21 @@ void IEvtSchedulerDestroy() {
     if (Event::s_netServer) {
         uint32_t processors = OsGetNumberOfProcessors();
 
-        SThread* shutdownThread = new (SMemAlloc(sizeof(SThread), __FILE__, __LINE__, 0)) SThread;
-        *shutdownThreads.New() = shutdownThread;
+        void* shutdownMem = SMemAlloc(sizeof(SThread), __FILE__, __LINE__, 0);
 
-        while (processors) {
-            processors--;
+        if (shutdownMem) {
+            SThread* shutdownThread = new (shutdownMem) SThread;
+            *shutdownThreads.New() = shutdownThread;
 
-            SThread thread;
+            while (processors && shutdownThreads.Count()) {
+                processors--;
 
-            if (!SThread::Create(WaitPumpingNetwork, &shutdownEvent, **shutdownThreads.Top(), const_cast<char*>("EvtShutdown"), 0)) {
-                delete *shutdownThreads.Top();
-                shutdownThreads.SetCount(shutdownThreads.Count() - 1);
+                SThread thread;
+
+                if (!SThread::Create(WaitPumpingNetwork, &shutdownEvent, **shutdownThreads.Top(), const_cast<char*>("EvtShutdown"), 0)) {
+                    delete *shutdownThreads.Top();
+                    shutdownThreads.SetCount(shutdownThreads.Count() - 1);
+                }
             }
         }
     }
@@ -570,7 +574,7 @@ int32_t SchedulerThreadProcProcess(uint32_t hThread, int32_t* watchdogStarted) {
     if (context) {
         timeout = context->m_schedNextWakeTime.m_val - OsGetAsyncTimeMs();
 
-        if (timeout < 0) {
+        if (timeout < 0 || context->m_schedIdleTime == 0) {
             timeout = 0;
         }
     }
@@ -585,7 +589,8 @@ int32_t SchedulerThreadProcProcess(uint32_t hThread, int32_t* watchdogStarted) {
         OsNetPump(timeout);
         result = 258;
     } else {
-        result = Event::s_threadSlots[hThread]->m_wakeEvent.Wait(timeout);
+        // ʕ •ᴥ•ʔ✿ Wait(1) on this machine returns in ~3ms and locks the client at 333 fps ✿ ʕ •ᴥ•ʔ
+        result = timeout ? Event::s_threadSlots[hThread]->m_wakeEvent.Wait(timeout) : 258;
     }
 
     if (!context) {
@@ -603,7 +608,11 @@ int32_t SchedulerThreadProcProcess(uint32_t hThread, int32_t* watchdogStarted) {
             *watchdogStarted = 1;
         }
 
-        float elapsedSec = static_cast<float>(static_cast<int32_t>(currTime - context->m_schedLastIdle)) * 0.001f;
+        static uint64_t s_lastClocks;
+        uint64_t clocks = OsGetAsyncTimeClocks();
+        uint64_t clocksPerSecond = static_cast<uint64_t>(OsGetAsyncClocksPerSecond());
+        float elapsedSec = s_lastClocks && clocksPerSecond ? static_cast<float>(clocks - s_lastClocks) / static_cast<float>(clocksPerSecond) : static_cast<float>(static_cast<int32_t>(currTime - context->m_schedLastIdle)) * 0.001f;
+        s_lastClocks = clocks;
         context->m_schedLastIdle = currTime;
 
         IEvtDispatchUpdate(context, currTime, elapsedSec);
@@ -737,7 +746,13 @@ void IEvtSchedulerInitialize(uint32_t threadCount, int32_t netServer) {
     Event::s_mainThread = InitializeSchedulerThread();
 
     for (uint32_t i = threadCount - 1; i; i--) {
-        SThread* thread = new (SMemAlloc(sizeof(SThread), __FILE__, __LINE__, 0)) SThread;
+        void* threadMem = SMemAlloc(sizeof(SThread), __FILE__, __LINE__, 0);
+
+        if (!threadMem) {
+            continue;
+        }
+
+        SThread* thread = new (threadMem) SThread;
         *Event::s_schedulerThreads.New() = thread;
 
         char name[16];
@@ -753,9 +768,7 @@ void IEvtSchedulerInitialize(uint32_t threadCount, int32_t netServer) {
 // VERIFY: da7dda2f manual
 // OFFSET: 0x0047F5C0
 HEVENTCONTEXT IEvtSchedulerCreateContext(int32_t interactive, EVENTHANDLERFUNC initializeHandler, EVENTHANDLERFUNC destroyHandler, uint32_t idleTime, uint32_t debugFlags) {
-    if (idleTime < 1) {
-        idleTime = 1;
-    }
+    // ʕ •ᴥ•ʔ✿ Client passes 0. Wait(1) on Windows wakes in ~3ms and pins the loop at 333 fps ✿ ʕ •ᴥ•ʔ
 
     void* callContext = nullptr;
 

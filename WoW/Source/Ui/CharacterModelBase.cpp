@@ -76,7 +76,7 @@ CSimpleFrame* CGCharacterModelBase::Create(CSimpleFrame* parent) {
         SErrDisplayAppFatalMessage("", "", 0);
     }
 
-    void* data = CGCharacterModelBase::s_characterModelHeap.GetData(0, typeid(CGCharacterModelBase).raw_name(), SLOG_OBJECT);
+    void* data = CGCharacterModelBase::s_characterModelHeap.GetData(0, RAW_TYPE_NAME(CGCharacterModelBase), SLOG_OBJECT);
     return data ? new (data) CGCharacterModelBase(parent) : nullptr;
 }
 
@@ -177,7 +177,7 @@ void CGCharacterModelBase::SetCreature(CreatureStats_C* stats) {
 int32_t CGCharacterModelBase::ShowThis() {
     if (!this->m_isVisible) {
         if (this->m_unitGuid != WOWGUID()) {
-            CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPE_UNIT, __FILE__, __LINE__));
+            CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPEMASK_UNIT, __FILE__, __LINE__));
 
             if (unit) {
                 this->SetUpModel(unit);
@@ -198,7 +198,7 @@ int32_t CGCharacterModelBase::IsDrawable() {
         return 0;
     }
 
-    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPE_UNIT, __FILE__, __LINE__));
+    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPEMASK_UNIT, __FILE__, __LINE__));
 
     if (unit && !IsUnitDrawable(unit)) {
         return 0;
@@ -236,7 +236,7 @@ void CGCharacterModelBase::RefreshUnit(WOWGUID guid) {
     this->m_creatureStats = nullptr;
 
     if (this->m_isVisible) {
-        CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(guid, TYPE_UNIT, __FILE__, __LINE__));
+        CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_UNIT, __FILE__, __LINE__));
 
         if (unit) {
             this->SetUpModel(unit);
@@ -317,7 +317,7 @@ void CGCharacterModelBase::SetUpModel(CreatureStats_C* stats) {
 // VERIFY: 24702114 auto
 // OFFSET: 0x005974A0
 void CGCharacterModelBase::ConfigureCamera() {
-    this->SetCameraByID(CAMERA_PAPERDOLL);
+    this->SetCameraByID(1);
     CCamera* camera;
 
     if (this->m_camera) {

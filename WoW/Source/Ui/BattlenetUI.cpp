@@ -242,7 +242,6 @@ void BattlenetUI::SendScriptEvent(uint32_t event, const char* format, ...) {
     if (CGGameUI::m_initialized) {
         vFrameScript_SignalEvent(event, format, args);
     }
-    va_end(args);
 }
 
 // VERIFY: 0ddbd7df auto

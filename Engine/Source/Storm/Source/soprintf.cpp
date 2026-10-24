@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include "Engine/Source/Base/OsCrt.h"
 #include "Engine/Source/Storm/H/storm.h"
 
 #define MAX_ARGUMENTS 64
@@ -121,12 +122,16 @@ static int32_t ParseFormatSpecifier(const char** format, ArgumentSize* size, int
 // VERIFY: 7c8d9894 manual
 // OFFSET: 0x00773E10
 static void FixUpLongLongFormatSpecifier(char* specifier) {
+#if defined(_MSC_VER)
     char* ll = strstr(specifier, "ll");
 
     if (ll) {
         memmove(ll + 3, ll + 2, strlen(ll) - 1);
         memcpy(ll, "I64", 3);
     }
+#else
+    (void)specifier;
+#endif
 }
 
 // VERIFY: 33f0aefe manual
@@ -267,7 +272,14 @@ int32_t vsnoprintf(char* out, size_t outSize, const char* format, va_list argume
             written = _snprintf(dest, avail, specifier, values[argument].doubleValue);
             break;
         case e_takesNoSpace:
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-security"
+#endif
             written = _snprintf(dest, avail, specifier);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
             break;
         }
 

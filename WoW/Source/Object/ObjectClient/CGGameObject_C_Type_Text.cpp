@@ -1,11 +1,10 @@
 #include "CGGameObject_C_Type_Text.h"
-#include "WoW/Source/UIUtil/Types.h"
 #include "WoW/Source/Ui/ItemTextFrame.h"
 
 // VERIFY: ec789ebc auto
 // OFFSET: 0x007126D0
 CGGameObject_C_Type_Text::CGGameObject_C_Type_Text(CGGameObject_C* owner) : CGGameObject_C_TypeAnimated(owner) {
-    this->m_interactDistance = MAX_SHOP_DISTANCE;
+    this->m_interactDistance = 5.5555553f;
 }
 
 // VERIFY: 6f615625 auto
@@ -23,7 +22,7 @@ void CGGameObject_C_Type_Text::StartInteraction() {
 // VERIFY: 829ac8b8 auto
 // OFFSET: 0x0070B540
 int32_t CGGameObject_C_Type_Text::CanChangeCursor() const {
-    return this->CanUseNow(nullptr, nullptr, nullptr) ? INSPECT_CURSOR : INSPECT_ERROR_CURSOR;
+    return this->CanUseNow(nullptr, nullptr, nullptr) ? 7 : 33;
 }
 
 // VERIFY: 990b081a auto

@@ -70,6 +70,8 @@ class CMapChunk : public CMapBaseObj {
     static void Destroy();
     static void Initialize();
     static void InitializeVertexGrid();
+    static void SetVertexColorFormat(int32_t format);
+    static void FlushQueuedVisibility();
     static bool CanMergeChunkLayers(CMapChunk* chunkA, CMapChunk* chunkB);
 
     /* 0024 */ C2iVector m_aIndex;
@@ -108,6 +110,8 @@ class CMapChunk : public CMapBaseObj {
     /* 013C */ CWSoundEmitter* m_soundEmitters;
     /* 0140 */ CBitArray m_deepBits;
     /* 014C */ CBitArray m_fishableBits;
+    int32_t m_cullStamp;
+    uint8_t m_cullVisible;
 
     virtual void SelectLights(CM2Lighting* lighting);
 

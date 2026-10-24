@@ -17,10 +17,12 @@ enum EGxApi {
     GxApi_D3d10 = 3,
     GxApi_D3d11 = 4,
     GxApi_GLL = 5,
-    // Not in the 3.3.5a binary: the Vulkan backend (Engine/Source/Gx/CGxDeviceVulkan). Appended after the
-    // original six so every table and loop indexed by EGxApi keeps the binary's values for 0..5.
+#if defined(WOWDECOMP_VULKAN)
     GxApi_Vulkan = 6,
     GxApis_Last = 7,
+#else
+    GxApis_Last = 6,
+#endif
 };
 
 enum EGxBlend {
@@ -37,14 +39,6 @@ enum EGxBlend {
     GxBlend_NoAlphaAdd = 10,
     GxBlend_ConstantAlpha = 11,
     GxBlends_Last = 12,
-};
-
-enum EGxCmp : int32_t {
-    GxCmp_LEqual = 0,
-    GxCmp_Equal = 1,
-    GxCmp_GEqual = 2,
-    GxCmp_Less = 3,
-    GxCmps_Last = 4,
 };
 
 enum EGxTexFormat {
@@ -116,13 +110,8 @@ enum EGxTexCommand {
     GxTex_Lock = 0,
     GxTex_Latch = 1,
     GxTex_Unlock = 2,
-    GxTex_Recreate = 3,
+    GxTex_3 = 3,
     GxTexCommands_Last = 4,
-};
-
-enum EGx : int32_t {
-    Gx_SizeMinimized = 1,
-    Gx_SizeMaxHide = 2,
 };
 
 enum EGxWM {
@@ -133,21 +122,11 @@ enum EGxWM {
     GxWM_KillFocus = 4,
 };
 
-enum EGxTexCubeFace : uint32_t {
-    GxTex_PositiveX = 0,
-    GxTex_NegativeX = 1,
-    GxTex_PositiveY = 2,
-    GxTex_NegativeY = 3,
-    GxTex_PositiveZ = 4,
-    GxTex_NegativeZ = 5,
-    GxTexCubeFaces_Last = 6,
-};
-
 enum EGxTexGen {
     GxTexGen_Disabled = 0,
     GxTexGen_ObjectLinear = 1,
-    GxTexGen_World = 2,
-    GxTexGen_View = 3,
+    GxTexGen_EyeLinear = 2,
+    GxTexGen_Unk3 = 3,
     GxTexGen_ReflectionMap = 4,
     GxTexGen_Normal = 5,
     GxTexGen_SphereMap = 6,
@@ -368,7 +347,7 @@ enum EGxRenderState {
     GxRs_PointScaleMin = 81,
     GxRs_PointScaleMax = 82,
     GxRs_PointSprite = 83,
-    GxRs_BlendFactor = 84,
+    Unk84 = 84,
     GxRs_ColorMaterial = 85,
     GxRenderStates_Last = 86,
 };

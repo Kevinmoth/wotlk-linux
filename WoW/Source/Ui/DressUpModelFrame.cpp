@@ -14,7 +14,6 @@
 #include "WoW/Source/DB/DBClient/DBCacheInstances.h"
 #include "WoW/Source/DB/DBClient/CreatureStats_C.h"
 #include "WoW/Source/DB/Rec/SpellRec.h"
-#include "WoW/Source/Magic/MagicClient/SpellEnums.h"
 #include "WoW/Source/Object/ItemStats.h"
 #include "WoW/Source/Object/Player.h"
 #include "WoW/Source/Object/Unit.h"
@@ -62,7 +61,7 @@ CSimpleFrame* CGDressUpModelFrame::Create(CSimpleFrame* parent) {
         SErrDisplayAppFatalMessage("", "", 0);
     }
 
-    void* data = CGDressUpModelFrame::s_dressUpModelHeap.GetData(0, typeid(CGDressUpModelFrame).raw_name(), SLOG_OBJECT);
+    void* data = CGDressUpModelFrame::s_dressUpModelHeap.GetData(0, RAW_TYPE_NAME(CGDressUpModelFrame), SLOG_OBJECT);
     return data ? new (data) CGDressUpModelFrame(parent) : nullptr;
 }
 
@@ -103,6 +102,8 @@ bool CGDressUpModelFrame::IsA(const char* typeName) {
     return !SStrCmpI(typeName, CGDressUpModelFrame::s_objectTypeName, STORM_MAX_STR) || CGCharacterModelBase::IsA(typeName);
 }
 
+static void ApplyWornMesh(CM2Model* dst, CM2Model* src);
+
 // VERIFY: 79d529ac manual
 // OFFSET: 0x00597F40
 void CGDressUpModelFrame::UpdateModel() {
@@ -114,6 +115,13 @@ void CGDressUpModelFrame::UpdateModel() {
 
     uint32_t ready = this->m_component->RenderPrep(0) & 1;
     CM2Model* model = this->m_component->m_data.m_model;
+
+    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPEMASK_UNIT, __FILE__, __LINE__));
+
+    if (unit && unit->m_unit && unit->m_unit->m_unitFieldNativedisplayid == unit->m_unit->m_unitFieldDisplayid) {
+        // ʕ •ᴥ•ʔ✿ Prep just hid every geoset except the bald defaults. Put back the hair, ears, and face the world model is drawing ✿ ʕ •ᴥ•ʔ
+        ApplyWornMesh(model, unit->m_worldModel);
+    }
 
     if (model->m_attachParent) {
         model->m_fFlags = (model->m_fFlags & ~0x80u) | (ready << 7);
@@ -196,6 +204,10 @@ CM2Model* CGDressUpModelFrame::GetDuplicateUnitCharacterModel(CGUnit_C* unit) {
         return nullptr;
     }
 
+    if (unit->m_worldModel && (unit->m_worldModel->m_fFlags & 1) && unit->m_unit && unit->m_unit->m_unitFieldNativedisplayid == unit->m_unit->m_unitFieldDisplayid) {
+        return this->GetScene()->DuplicateModel(unit->m_worldModel, 0);
+    }
+
     const char* modelName = modelData->m_modelName;
 
     if (!modelName || !*modelName) {
@@ -272,7 +284,7 @@ void CGDressUpModelFrame::TryOnWithVisual(int32_t itemId, int32_t visual, int32_
 
             SpellRec learned;
 
-            if (spell.m_effect[0] != SPELL_EFFECT_LEARN_SPELL) {
+            if (spell.m_effect[0] != 36) {
                 continue;
             }
 
@@ -287,7 +299,7 @@ void CGDressUpModelFrame::TryOnWithVisual(int32_t itemId, int32_t visual, int32_
                 }
             }
 
-            if (g_spellDB.GetRecord(learnedId, &learned) && learned.m_effect[0] == SPELL_EFFECT_CREATE_ITEM) {
+            if (g_spellDB.GetRecord(learnedId, &learned) && learned.m_effect[0] == 24) {
                 this->TryOn(learned.m_effectItemType[0], nullptr, -1);
                 return;
             }
@@ -354,7 +366,7 @@ void CGDressUpModelFrame::TryOnWithVisual(int32_t itemId, int32_t visual, int32_
             ItemDisplayInfoRec display;
 
             if (g_itemDisplayInfoDB.GetRecord(stats->m_displayId, &display) && (display.m_flags & 0x1)) {
-                CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPE_PLAYER, __FILE__, __LINE__));
+                CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPEMASK_PLAYER, __FILE__, __LINE__));
 
                 if (player) {
                     int32_t emblemStyle;
@@ -497,6 +509,49 @@ void CGDressUpModelFrame::TryOnItem(CGItem_C* item, int32_t hand) {
     }
 }
 
+static int32_t WornSection(uint32_t id) {
+    uint32_t key = id & 0xFFFF;
+    return (key >= 1 && key <= 99) || (key >= 100 && key <= 399) || (key >= 700 && key <= 799) || (key >= 1600 && key <= 1799);
+}
+
+static void CopyHairTexture(CM2Model* dst, CM2Model* src) {
+    if (!dst || !src || !(src->m_fFlags & 1) || !src->m_textures || !src->m_shared || !src->m_shared->m_data) {
+        return;
+    }
+
+    M2Data* data = src->m_shared->m_data;
+
+    for (uint32_t i = 0; i < data->m_textures.m_count; i++) {
+        if (data->m_textures[i].m_type == 6 && src->m_textures[i]) {
+            dst->ReplaceTexture(6, src->m_textures[i]);
+            return;
+        }
+    }
+}
+
+static void ApplyWornMesh(CM2Model* dst, CM2Model* src) {
+    if (!dst || !src || !(dst->m_fFlags & 1) || !(src->m_fFlags & 1) || !src->m_skinSections || !dst->m_skinSections) {
+        return;
+    }
+
+    if (!src->m_shared || !src->m_shared->m_skinData || dst->m_shared != src->m_shared) {
+        return;
+    }
+
+    M2SkinProfile* skin = src->m_shared->m_skinData;
+
+    for (uint32_t i = 0; i < skin->m_skinSections.m_count; i++) {
+        if (!WornSection(skin->m_skinSections[i].m_skinSectionId)) {
+            continue;
+        }
+
+        dst->m_skinSections[i] = src->m_skinSections[i] ? 1 : 0;
+    }
+
+    dst->UnoptimizeVisibleGeometry();
+    CopyHairTexture(dst, src);
+}
+
 // VERIFY: 8eaa7ea4 auto
 // OFFSET: 0x005989E0
 void CGDressUpModelFrame::SetModel(CM2Model* model) {
@@ -511,24 +566,37 @@ void CGDressUpModelFrame::SetModel(CM2Model* model) {
         return;
     }
 
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(this->m_unitGuid, TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (player) {
         this->m_component = CCharacterComponent::AllocComponent();
         model->m_refCount++;
         ComponentData data;
         data.m_preferences.m_raceID = player->m_unit->m_unitFieldBytes0[0];
-        data.m_preferences.m_sexID = player->m_player->m_playerBytes3[0];
+        // ʕ •ᴥ•ʔ✿ Hair and facial-hair meshes are keyed by the model gender. playerBytes3 can disagree, and the other sex's geoset is not in this skin ✿ ʕ •ᴥ•ʔ
+        data.m_preferences.m_sexID = player->m_unit->m_unitFieldBytes0[2];
         data.m_preferences.m_classId = player->m_unit->m_unitFieldBytes0[1];
         data.m_preferences.m_skinID = player->m_player->m_playerBytes[0];
         data.m_preferences.m_faceId = player->m_player->m_playerBytes[1];
         data.m_preferences.m_hairStyleId = player->m_player->m_playerBytes[2];
         data.m_preferences.m_hairColorId = player->m_player->m_playerBytes[3];
         data.m_preferences.m_facialHairId = player->m_player->m_playerBytes2[0];
+
+        CCharacterComponent* worldComponent = player->m_characterComponent;
+
+        if (worldComponent && worldComponent->m_data.m_preferences.m_raceID == data.m_preferences.m_raceID) {
+            data.m_preferences.m_skinID = worldComponent->m_data.m_preferences.m_skinID;
+            data.m_preferences.m_faceId = worldComponent->m_data.m_preferences.m_faceId;
+            data.m_preferences.m_hairStyleId = worldComponent->m_data.m_preferences.m_hairStyleId;
+            data.m_preferences.m_hairColorId = worldComponent->m_data.m_preferences.m_hairColorId;
+            data.m_preferences.m_facialHairId = worldComponent->m_data.m_preferences.m_facialHairId;
+        }
+
         data.m_model = model;
         data.m_flags ^= (data.m_flags ^ (static_cast<uint32_t>(player->m_obj->m_guid == ClntObjMgrGetActivePlayer()) << 1)) & 0x2;
         CCharacterComponent::ValidateComponentData(&data, COMPONENT_CONTEXT_2);
         this->m_component->Init(&data, nullptr);
+
         s_mainHandItemId = 0;
         s_offHandItemId = 0;
         s_nextHand = 15;
@@ -573,7 +641,7 @@ void CGDressUpModelFrame::SetModel(CM2Model* model) {
             }
         }
 
-        const CGUnitVirtualItem* mainHand = player->GetVirtualItem(VIRTUAL_MONSTER_SLOT_MAINHAND, true);
+        const CGUnitVirtualItem* mainHand = player->GetVirtualItem(0, true);
 
         if (mainHand) {
             this->m_mainHand = *mainHand;
@@ -581,7 +649,7 @@ void CGDressUpModelFrame::SetModel(CM2Model* model) {
             memset(&this->m_mainHand, 0, sizeof(this->m_mainHand));
         }
 
-        const CGUnitVirtualItem* offHand = player->GetVirtualItem(VIRTUAL_MONSTER_SLOT_OFFHAND, true);
+        const CGUnitVirtualItem* offHand = player->GetVirtualItem(1, true);
 
         if (offHand) {
             this->m_offHand = *offHand;

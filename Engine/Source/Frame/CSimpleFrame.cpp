@@ -217,16 +217,16 @@ CSimpleFrame::CSimpleFrame(CSimpleFrame* parent) {
 
     this->SetParent(parent);
 
-    this->m_drawLayerEnabled[DRAWLAYER_BACKGROUND] = 1;
-    this->m_drawLayerEnabled[DRAWLAYER_BACKGROUND_BORDER] = 1;
-    this->m_drawLayerEnabled[DRAWLAYER_ARTWORK] = 1;
-    this->m_drawLayerEnabled[DRAWLAYER_ARTWORK_OVERLAY] = 1;
-    this->m_drawLayerEnabled[DRAWLAYER_HIGHLIGHT] = 0;
-    this->m_renderBatch[DRAWLAYER_BACKGROUND] = nullptr;
-    this->m_renderBatch[DRAWLAYER_BACKGROUND_BORDER] = nullptr;
-    this->m_renderBatch[DRAWLAYER_ARTWORK] = nullptr;
-    this->m_renderBatch[DRAWLAYER_ARTWORK_OVERLAY] = nullptr;
-    this->m_renderBatch[DRAWLAYER_HIGHLIGHT] = nullptr;
+    this->m_drawLayerEnabled[0] = 1;
+    this->m_drawLayerEnabled[1] = 1;
+    this->m_drawLayerEnabled[2] = 1;
+    this->m_drawLayerEnabled[3] = 1;
+    this->m_drawLayerEnabled[4] = 0;
+    this->m_renderBatch[0] = nullptr;
+    this->m_renderBatch[1] = nullptr;
+    this->m_renderBatch[2] = nullptr;
+    this->m_renderBatch[3] = nullptr;
+    this->m_renderBatch[4] = nullptr;
 
     this->Show();
 }
@@ -243,7 +243,7 @@ CSimpleFrame::~CSimpleFrame() {
         delete this->m_titleRegion;
     }
 
-    for (uint32_t i = 0; i < NUM_SIMPLEFRAME_DRAWLAYERS; i++) {
+    for (uint32_t i = 0; i < 5; i++) {
         this->m_drawLayers[i].UnlinkAll();
 
         if (this->m_renderBatch[i]) {
@@ -651,7 +651,7 @@ void CSimpleFrame::LoadXML_Layers(XMLNode* node, CStatus* status) {
             continue;
         }
 
-        uint32_t drawLayer = DRAWLAYER_ARTWORK;
+        uint32_t drawLayer = 2;
         const char* level = layerNode->GetAttributeByName("level");
 
         if (level && *level) {
@@ -1481,8 +1481,8 @@ void CSimpleFrame::OnLayerCursorEnter(int32_t motion) {
     }
 
     if (!this->m_highlightLocked) {
-        this->m_drawLayerEnabled[DRAWLAYER_HIGHLIGHT] = 1;
-        this->NotifyDrawLayerChanged(DRAWLAYER_HIGHLIGHT);
+        this->m_drawLayerEnabled[4] = 1;
+        this->NotifyDrawLayerChanged(4);
     }
 
     this->RunOnEnterScript(motion);
@@ -1496,8 +1496,8 @@ void CSimpleFrame::OnLayerCursorExit(int32_t motion, int32_t a3) {
     }
 
     if (!this->m_highlightLocked) {
-        this->m_drawLayerEnabled[DRAWLAYER_HIGHLIGHT] = 0;
-        this->NotifyDrawLayerChanged(DRAWLAYER_HIGHLIGHT);
+        this->m_drawLayerEnabled[4] = 0;
+        this->NotifyDrawLayerChanged(4);
     }
 
     if (a3) {
@@ -1518,11 +1518,11 @@ void CSimpleFrame::LockHighlight(int32_t lock) {
     this->m_highlightLocked = lock;
 
     if (lock) {
-        this->m_drawLayerEnabled[DRAWLAYER_HIGHLIGHT] = 1;
-        this->NotifyDrawLayerChanged(DRAWLAYER_HIGHLIGHT);
+        this->m_drawLayerEnabled[4] = 1;
+        this->NotifyDrawLayerChanged(4);
     } else if (this->m_simpleTop->m_mouseFocus != this) {
-        this->m_drawLayerEnabled[DRAWLAYER_HIGHLIGHT] = 0;
-        this->NotifyDrawLayerChanged(DRAWLAYER_HIGHLIGHT);
+        this->m_drawLayerEnabled[4] = 0;
+        this->NotifyDrawLayerChanged(4);
     }
 }
 
@@ -1941,6 +1941,11 @@ void CSimpleFrame::StopAnimating() {
 
 // VERIFY: 8b0118ef manual
 // OFFSET: 0x00491A70
+static int32_t FramePointerOk(const void* pointer) {
+    uintptr_t value = reinterpret_cast<uintptr_t>(pointer);
+    return value > 0x10000 && (value & (sizeof(void*) - 1)) == 0;
+}
+
 void CSimpleFrame::AnimActivated(CSimpleAnimGroup* group, int32_t first, int32_t hasAlpha) {
     if (first && (!this->m_playingAnimGroups || !this->m_playingAnimGroups->Head())) {
         this->StoreAnimPosition();
@@ -1952,10 +1957,12 @@ void CSimpleFrame::AnimActivated(CSimpleAnimGroup* group, int32_t first, int32_t
     }
 
     for (SIMPLEFRAMENODE* node = this->m_children.Head(); node; node = this->m_children.Next(node)) {
+        if (!FramePointerOk(node) || !FramePointerOk(node->m_frame)) break;
         node->m_frame->AnimActivated(group, first, hasAlpha);
     }
 
     for (CSimpleRegion* region = this->m_regions.Head(); region; region = this->m_regions.Next(region)) {
+        if (!FramePointerOk(region)) break;
         region->AnimActivated(group, first, hasAlpha);
     }
 }
@@ -2028,7 +2035,7 @@ void CSimpleFrame::OnFrameRender() {
     this->m_batchDirty = 0;
 
     if (dirty) {
-        for (uint32_t layer = 0; layer < NUM_SIMPLEFRAME_DRAWLAYERS; layer++) {
+        for (uint32_t layer = 0; layer < 5; layer++) {
             if (!this->m_renderBatch[layer]) {
                 void* mem = SMemAlloc(sizeof(CRenderBatch), __FILE__, __LINE__, 0);
                 this->m_renderBatch[layer] = mem ? new (mem) CRenderBatch() : nullptr;
@@ -2052,13 +2059,13 @@ void CSimpleFrame::OnFrameRender() {
         }
 
         if (this->m_batchDirty & 0x20) {
-            for (uint32_t layer = 0; layer < NUM_SIMPLEFRAME_DRAWLAYERS; layer++) {
+            for (uint32_t layer = 0; layer < 5; layer++) {
                 this->m_batchDirty |= 1 << layer;
             }
         }
     }
 
-    for (uint32_t layer = 0; layer < NUM_SIMPLEFRAME_DRAWLAYERS; layer++) {
+    for (uint32_t layer = 0; layer < 5; layer++) {
         if (this->m_renderBatch[layer]) {
             CSimpleRender::DrawBatch(this->m_renderBatch[layer]);
         }

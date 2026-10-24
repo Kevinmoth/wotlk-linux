@@ -25,13 +25,19 @@ x64/
 x86/
 [Ww][Ii][Nn]32/
 !Engine/**/[Ww]in32/
+!WoW/**/[Ww]in32/
+!ThirdParty/**/x64/
 [Aa][Rr][Mm]/
 [Aa][Rr][Mm]64/
 bld/
 [Bb]in/
+test/
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
+# ʕ •ᴥ•ʔ✿ Squad notes live here. The log/ rule above would hide them. ✿ ʕ •ᴥ•ʔ
+!docs/perf-squads/log/
+!docs/perf-squads/log/**
 [Oo]ut/
 
 # Visual Studio 2015/2017 cache/options directory
@@ -410,4 +416,18 @@ FodyWeavers.xsd
 
 # Local Visual Studio CMake settings (absolute paths to re/tools)
 CMakeSettings.json
-/Tools/VulkanShaders/translated
+/build/
+/out-server-items
+
+android/.gradle/
+android/local.properties
+android/**/.cxx/
+android/app/build/
+android/build/
+
+# Cursor / agent orchestration (local instructions, not product source)
+.cursor/
+AGENTS.md
+.cursorrules
+docs/wasm-addon-progress.md
+docs/multiplatform.html

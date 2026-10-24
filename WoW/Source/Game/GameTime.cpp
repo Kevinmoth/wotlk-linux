@@ -2,8 +2,6 @@
 #include "Engine/Source/Os/TimeManager.h"
 #include "Engine/Source/Storm/H/storm.h"
 
-static const float MAXMINUTES_PER_SECOND = 60.0f;
-
 // STATIC: 0x00D37F98
 CGameTime g_clientGameTime;
 
@@ -35,8 +33,8 @@ float CGameTime::GameTimeSetMinutesPerSecond(float minutesPerSecond) {
 
     if (minutesPerSecond < 1.0f / 60.0f) {
         this->m_minutesPerSecond = 1.0f / 60.0f;
-    } else if (minutesPerSecond > MAXMINUTES_PER_SECOND) {
-        this->m_minutesPerSecond = MAXMINUTES_PER_SECOND;
+    } else if (minutesPerSecond > 60.0f) {
+        this->m_minutesPerSecond = 60.0f;
     } else {
         this->m_minutesPerSecond = minutesPerSecond;
     }
@@ -252,12 +250,27 @@ TIMESTAMPCALLBACK* CGameTime::GameTimeRegisterCallback(const WowTime* time, void
     int32_t minutes = time->GetHourAndMinutes();
     HASHKEY_NONE key;
     TIMESTAMPSTRUCT* stamp = this->m_timeStamps.Ptr(minutes, key);
+    bool created = false;
 
     if (!stamp) {
         stamp = this->m_timeStamps.New(minutes, key, 0, 0);
+        created = stamp != nullptr;
+    }
+
+    if (!stamp) {
+        return nullptr;
     }
 
     TIMESTAMPCALLBACK* node = stamp->m_callbacks.NewNode(2, 0, 0);
+
+    if (!node) {
+        if (created) {
+            this->m_timeStamps.Delete(stamp);
+        }
+
+        return nullptr;
+    }
+
     node->m_param = param;
     node->m_callback = callback;
     return node;

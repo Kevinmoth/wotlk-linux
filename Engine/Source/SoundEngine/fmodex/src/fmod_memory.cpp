@@ -7,6 +7,7 @@
 #include "fmod_string.h"
 #include "fmod_types.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -614,6 +615,16 @@ void *MemPool::alloc(int len, const char *file, const int line, FMOD_MEMORY_TYPE
 	MemBlockHeader *block = 0;
     int numblocks = 0, reallen = len;
 
+    if (len < 0)
+    {
+        return 0;
+    }
+
+    if (!mCustomPool && len > INT_MAX - (int)sizeof(MemBlockHeader))
+    {
+        return 0;
+    }
+
 #ifdef FMOD_MEMORY_THREADSAFE
     if (!mCrit)
     {
@@ -720,6 +731,11 @@ void *MemPool::alloc(int len, const char *file, const int line, FMOD_MEMORY_TYPE
 // OFFSET: 0x008CFF30
 void MemPool::free(void *ptr, const char *file, const int line, FMOD_MEMORY_TYPE type)
 {
+    if (!ptr)
+    {
+        return;
+    }
+
 	MemBlockHeader *block = (MemBlockHeader *)ptr;
 
 #ifdef FMOD_MEMORY_THREADSAFE
@@ -811,6 +827,16 @@ void *MemPool::realloc(void *ptr, int len, const char *file, const int line, FMO
         return MemPool::alloc(len, file, line);
     }
 
+    if (len < 0)
+    {
+        return 0;
+    }
+
+    if (!mCustomPool && len > INT_MAX - (int)sizeof(MemBlockHeader))
+    {
+        return 0;
+    }
+
 #ifdef FMOD_MEMORY_THREADSAFE
     if (!mCrit)
     {
@@ -836,7 +862,13 @@ void *MemPool::realloc(void *ptr, int len, const char *file, const int line, FMO
 
     if (mRealloc)
     {
+        MemBlockHeader *owned = block;
+
     	block = (MemBlockHeader *)mRealloc(block, reallen, type);
+        if (!block && mFree)
+        {
+            mFree(owned, type);
+        }
     }
     else
     {

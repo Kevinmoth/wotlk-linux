@@ -60,7 +60,7 @@ static int32_t Script_GetNumFriends(lua_State* L) {
     uint32_t count = list->GetNumFriends();
 
     for (uint32_t i = 0; i < count; i++) {
-        if (list->m_friends[i].m_connected) {
+        if (i <= 100 && list->m_friends[i].m_connected) {
             online++;
         }
     }
@@ -261,7 +261,7 @@ static int32_t Script_SetSelectedFriend(lua_State* L) {
     uint32_t index = static_cast<uint32_t>(lua_tonumber(L, 1)) - 1;
     FriendList* list = FriendList::s_friendList;
 
-    if (index < 100) {
+    if (index <= 100) {
         list->m_selectedFriend = list->m_friends[index].m_guid;
     } else {
         list->m_selectedFriend = WOWGUID();
@@ -300,7 +300,7 @@ static int32_t Script_GetIgnoreName(lua_State* L) {
     uint32_t index = static_cast<uint32_t>(lua_tonumber(L, 1)) - 1;
     NameCache* record;
 
-    if (index < 50 && FriendList::s_friendList->m_ignores[index].m_guid) {
+    if (index <= 50 && FriendList::s_friendList->m_ignores[index].m_guid) {
         WOWGUID none = WOWGUID();
 
         if ((record = g_nameDBCache.GetRecord(FriendList::s_friendList->m_ignores[index].m_guid.m_guid, none, nullptr, nullptr, false))) {
@@ -332,7 +332,7 @@ static int32_t Script_GetMuteName(lua_State* L) {
     uint32_t index = static_cast<uint32_t>(lua_tonumber(L, 1)) - 1;
     NameCache* record;
 
-    if (index < 50 && FriendList::s_friendList->m_mutes[index].m_guid) {
+    if (index <= 50 && FriendList::s_friendList->m_mutes[index].m_guid) {
         WOWGUID none = WOWGUID();
 
         if ((record = g_nameDBCache.GetRecord(FriendList::s_friendList->m_mutes[index].m_guid.m_guid, none, nullptr, nullptr, false))) {
@@ -364,7 +364,7 @@ static int32_t Script_SetSelectedIgnore(lua_State* L) {
     uint32_t index = static_cast<uint32_t>(lua_tonumber(L, 1)) - 1;
     FriendList* list = FriendList::s_friendList;
 
-    if (index < 50) {
+    if (index <= 50) {
         list->m_selectedIgnore = list->m_ignores[index].m_guid;
     } else {
         list->m_selectedIgnore = WOWGUID();
@@ -384,7 +384,7 @@ static int32_t Script_SetSelectedMute(lua_State* L) {
     uint32_t index = static_cast<uint32_t>(lua_tonumber(L, 1)) - 1;
     FriendList* list = FriendList::s_friendList;
 
-    if (index < 50) {
+    if (index <= 50) {
         list->m_selectedMute = list->m_mutes[index].m_guid;
     } else {
         list->m_selectedMute = WOWGUID();
@@ -415,34 +415,34 @@ static int32_t Script_SortWho(lua_State* L) {
         return 0;
     }
 
-    WHO_SORT_TYPE field = WHO_SORT_NAME;
+    int32_t field = 4;
     const char* type = lua_tolstring(L, 1, nullptr);
 
     if (!SStrCmpI(type, "name", STORM_MAX_STR)) {
-        field = WHO_SORT_NAME;
+        field = 4;
     } else if (!SStrCmpI(type, "level", STORM_MAX_STR)) {
-        field = WHO_SORT_LEVEL;
+        field = 1;
     } else if (!SStrCmpI(type, "class", STORM_MAX_STR)) {
-        field = WHO_SORT_CLASS;
+        field = 2;
     } else if (!SStrCmpI(type, "group", STORM_MAX_STR)) {
-        field = WHO_SORT_GROUP;
+        field = 3;
     } else if (!SStrCmpI(type, "race", STORM_MAX_STR)) {
-        field = WHO_SORT_RACE;
+        field = 5;
     } else if (!SStrCmpI(type, "zone", STORM_MAX_STR)) {
-        field = WHO_SORT_ZONE;
+        field = 0;
     } else if (!SStrCmpI(type, "guild", STORM_MAX_STR)) {
-        field = WHO_SORT_GUILD;
+        field = 6;
     }
 
     uint32_t i;
 
-    for (i = 0; i < NUM_WHO_SORT_TYPES; i++) {
+    for (i = 0; i < 7; i++) {
         if (FriendList::s_whoSort[i].m_field == field) {
             break;
         }
     }
 
-    if (i < NUM_WHO_SORT_TYPES) {
+    if (i < 7) {
         int32_t reverse = FriendList::s_whoSort[i].m_reverse;
 
         if (!i) {

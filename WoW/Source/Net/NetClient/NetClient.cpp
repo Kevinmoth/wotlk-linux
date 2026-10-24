@@ -10,6 +10,7 @@
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/Glue/CGlueMgr.h"
 #include "WoW/Source/WowServices/HMAC.h"
+#include "WoW/Source/WowServices/WowConnectionNet.h"
 
 // STATIC: 0x00AD2ED0
 static TSList<NETCLIENTNODE> s_clientList;
@@ -212,10 +213,27 @@ int32_t NetClient::Initialize() {
 
     NetClient::s_clientCount++;
 
-    this->m_netEventQueue = new (SMemAlloc(sizeof(NETEVENTQUEUE), __FILE__, __LINE__, 0)) NETEVENTQUEUE(this);
+    void* queueMem = SMemAlloc(sizeof(NETEVENTQUEUE), __FILE__, __LINE__, 0);
+
+    if (!queueMem) {
+        NetClient::s_clientCount--;
+        return 0;
+    }
+
+    this->m_netEventQueue = new (queueMem) NETEVENTQUEUE(this);
     memset(this->m_handlers, 0, sizeof(this->m_handlers));
     memset(this->m_handlerParams, 0, sizeof(this->m_handlerParams));
-    this->m_serverConnection = new (SMemAlloc(sizeof(WowConnection), __FILE__, __LINE__, 0)) WowConnection(this, nullptr);
+
+    void* connectionMem = SMemAlloc(sizeof(WowConnection), __FILE__, __LINE__, 0);
+
+    if (!connectionMem) {
+        delete this->m_netEventQueue;
+        this->m_netEventQueue = nullptr;
+        NetClient::s_clientCount--;
+        return 0;
+    }
+
+    this->m_serverConnection = new (connectionMem) WowConnection(this, nullptr);
     this->m_netState = NS_INITIALIZED;
     s_initializeTime = OsGetAsyncTimeMs();
 
@@ -235,6 +253,9 @@ int32_t NetClient::ConnectInternal(const char* host, uint16_t port) {
     if (this->m_redirectConnection) {
         this->m_redirectConnection->SetResponse(nullptr, false);
         this->m_redirectConnection->Disconnect();
+        if (WowConnection::s_network) {
+            WowConnection::s_network->Remove(this->m_redirectConnection);
+        }
         this->m_redirectConnection->Release();
         this->m_redirectConnection = nullptr;
     }
@@ -496,6 +517,11 @@ void NetClient::WCDisconnected(WowConnection* connection, uint32_t timeStamp, co
 void NetClient::HandleAuthChallenge(WowConnection* connection, CDataStore* msg) {
     AuthenticationChallenge* challenge = static_cast<AuthenticationChallenge*>(SMemAlloc(sizeof(AuthenticationChallenge), __FILE__, __LINE__, 0));
 
+    if (!challenge) {
+        connection->Disconnect();
+        return;
+    }
+
     uint32_t difficulty;
     msg->Get(difficulty);
     msg->Get(challenge->m_serverSeed);
@@ -568,7 +594,9 @@ NetClient::NetClient() {
     this->m_objMgr = nullptr;
 
     NETCLIENTNODE* node = s_clientList.NewNode(2, 0, 0);
-    node->m_client = this;
+    if (node) {
+        node->m_client = this;
+    }
 }
 
 // VERIFY: 3e4c9045 manual
@@ -586,6 +614,9 @@ void NetClient::Send(CDataStore* msg) {
 
     if (this->m_suspended) {
         NetClient::HELDMESSAGE* held = this->m_heldMessages.NewNode(2, 0, 0);
+        if (!held) {
+            return;
+        }
         uint32_t bytes = msg->m_size - msg->m_read;
         void* data;
         msg->GetDataInSitu(data, bytes);
@@ -667,6 +698,9 @@ void NetClient::Disconnect() {
     if (this->m_redirectConnection) {
         this->m_redirectConnection->SetResponse(nullptr, false);
         this->m_redirectConnection->Disconnect();
+        if (WowConnection::s_network) {
+            WowConnection::s_network->Remove(this->m_redirectConnection);
+        }
         this->m_redirectConnection->Release();
         this->m_redirectConnection = nullptr;
     }
@@ -677,11 +711,19 @@ void NetClient::Disconnect() {
         return;
     }
 
+    void* connectionMem = SMemAlloc(sizeof(WowConnection), __FILE__, __LINE__, 0);
+    if (!connectionMem) {
+        return;
+    }
+
     this->m_serverConnection->SetResponse(nullptr, false);
     this->m_serverConnection->Disconnect();
     this->m_netEventQueue->Clear();
+    if (WowConnection::s_network) {
+        WowConnection::s_network->Remove(this->m_serverConnection);
+    }
     this->m_serverConnection->Release();
-    this->m_serverConnection = new (SMemAlloc(sizeof(WowConnection), __FILE__, __LINE__, 0)) WowConnection(this, nullptr);
+    this->m_serverConnection = new (connectionMem) WowConnection(this, nullptr);
     this->m_netState = NS_INITIALIZED;
 }
 
@@ -694,6 +736,9 @@ void NetClient::Destroy() {
 
     this->Disconnect();
     this->m_serverConnection->SetResponse(nullptr, false);
+    if (WowConnection::s_network) {
+        WowConnection::s_network->Remove(this->m_serverConnection);
+    }
     this->m_serverConnection->Release();
     this->m_serverConnection = nullptr;
     memset(this->m_handlers, 0, sizeof(this->m_handlers));
@@ -741,15 +786,23 @@ void NETEVENTQUEUE::AddEvent(EVENTID eventId, void* connection, NetClient* clien
     this->m_critSect.Enter();
 
     NETEVENTQUEUENODE* node = this->m_eventQueue.NewNode(2, 0, 8);
-    node->m_eventId = eventId;
+    if (!node) {
+        this->m_critSect.Leave();
+        return;
+    }
 
-    if (size) {
-        node->m_data = SMemAlloc(size, __FILE__, __LINE__, 0);
-        memcpy(node->m_data, data, size);
-        node->m_dataSize = size;
-    } else {
-        node->m_data = nullptr;
-        node->m_dataSize = 0;
+    node->m_eventId = eventId;
+    node->m_data = nullptr;
+    node->m_dataSize = 0;
+
+    if (size && data) {
+        void* payload = SMemAlloc(size, __FILE__, __LINE__, 0);
+
+        if (payload) {
+            memcpy(payload, data, size);
+            node->m_data = payload;
+            node->m_dataSize = size;
+        }
     }
 
     node->m_timeReceived = OsGetAsyncTimeMs();
@@ -799,10 +852,16 @@ void NetClient::HandleResumeComms(WowConnection* connection, CDataStore* msg) {
         this->m_redirectConnection = nullptr;
         old->SetResponse(nullptr, false);
         old->Disconnect();
+        if (WowConnection::s_network) {
+            WowConnection::s_network->Remove(old);
+        }
         old->Release();
     } else {
         this->m_redirectConnection->SetResponse(nullptr, false);
         this->m_redirectConnection->Disconnect();
+        if (WowConnection::s_network) {
+            WowConnection::s_network->Remove(this->m_redirectConnection);
+        }
         this->m_redirectConnection->Release();
         this->m_redirectConnection = nullptr;
     }
@@ -850,7 +909,17 @@ void NetClient::HandleRedirectClient(WowConnection* connection, CDataStore* msg)
         return;
     }
 
-    this->m_redirectConnection = new (SMemAlloc(sizeof(WowConnection), __FILE__, __LINE__, 0)) WowConnection(this, nullptr);
+    void* connectionMem = SMemAlloc(sizeof(WowConnection), __FILE__, __LINE__, 0);
+    if (!connectionMem) {
+        CDataStore response;
+        response.Put(static_cast<uint32_t>(CMSG_CONNECT_TO_FAILED));
+        response.Put(this->m_redirectKey);
+        response.Finalize();
+        this->Send(&response);
+        return;
+    }
+
+    this->m_redirectConnection = new (connectionMem) WowConnection(this, nullptr);
 
     HMAC<SHA1> hmac;
     SHA1::Digest digest;
@@ -863,6 +932,10 @@ void NetClient::HandleRedirectClient(WowConnection* connection, CDataStore* msg)
     msg->GetData(proof, sizeof(proof));
 
     if (memcmp(&digest, proof, sizeof(proof)) || !msg->IsRead() || msg->m_read > msg->m_size) {
+        this->m_redirectConnection->SetResponse(nullptr, false);
+        this->m_redirectConnection->Disconnect();
+        this->m_redirectConnection->Release();
+        this->m_redirectConnection = nullptr;
         connection->Disconnect();
     } else {
         this->m_redirectConnection->Connect(address, port, -1);

@@ -6,8 +6,6 @@
 #include "Engine/Source/ShaderEffect/ShaderEffect.h"
 #include "Engine/Source/Tempest/C33Matrix.h"
 
-static const float WATER_SPEC_EXP = 6.0f;
-
 // STATIC: 0x00D44CA8
 Liquid::VSConstants Liquid::s_vsConstants;
 
@@ -100,7 +98,7 @@ void Liquid::SetShaderLighting(const CM2Lighting& lighting) {
     Liquid::s_vsConstants.m_sunSpecular.x = lighting.m_sunSpecular.x;
     Liquid::s_vsConstants.m_sunSpecular.y = lighting.m_sunSpecular.y;
     Liquid::s_vsConstants.m_sunSpecular.z = lighting.m_sunSpecular.z;
-    Liquid::s_vsConstants.m_sunSpecular.w = WATER_SPEC_EXP;
+    Liquid::s_vsConstants.m_sunSpecular.w = 6.0f;
 
     uint32_t lightCount = lighting.m_lightCount;
 

@@ -4,7 +4,11 @@
 #include <cstdint>
 #include "Engine/Source/Event/Types.h"
 
+#if defined(_WIN32)
 struct tagRECT;
+#else
+#include "Engine/Source/Base/PlatformTypes.h"
+#endif
 
 enum OSINPUT {
     OS_INPUT_CAPTURE_CHANGED = 0,
@@ -21,22 +25,12 @@ enum OSINPUT {
     OS_INPUT_MOUSE_WHEEL = 11,
     OS_INPUT_MOUSE_MOVE_RELATIVE = 12,
     OS_INPUT_MOUSE_UP = 13,
-    OS_INPUT_JOYSTICK_STICK = 14,
-    OS_INPUT_JOYSTICK_AXIS = 15,
-    OS_INPUT_JOYSTICK_BUTTON_DOWN = 16,
-    OS_INPUT_JOYSTICK_BUTTON_UP = 17,
-    OS_INPUT_JOYSTICK_HAT = 18,
+    OS_INPUT_14 = 14,
+    OS_INPUT_15 = 15,
+    OS_INPUT_16 = 16,
+    OS_INPUT_17 = 17,
+    OS_INPUT_18 = 18,
     OS_INPUT_SHUTDOWN = 19,
-};
-
-enum : int32_t {
-    OS_INPUT_IME_NOTIFYLANGUAGE = 0,
-    OS_INPUT_IME_STARTCOMPOSITION = 1,
-    OS_INPUT_IME_COMPOSITION = 2,
-    OS_INPUT_IME_OPENCANDIDATES = 3,
-    OS_INPUT_IME_CHANGECANDIDATES = 4,
-    OS_INPUT_IME_CLOSECANDIDATES = 5,
-    OS_INPUT_IME_ENDCOMPOSITION = 6,
 };
 
 enum OS_MOUSE_MODE {
@@ -58,6 +52,7 @@ void OsInputSetWindowResizeLock(int32_t resizeLock);
 float OsInputGetMouseSpeed();
 void OsInputInitialize();
 void OsInputDestroy();
+void OsInputQuitDeferredEvents();
 void OsInputEnableSecureMode(int32_t enable);
 void OsInputSetEventPollProc(void (*pollProc)());
 int32_t OsInputGet(OSINPUT* id, int32_t* param0, int32_t* param1, int32_t* param2, int32_t* param3);

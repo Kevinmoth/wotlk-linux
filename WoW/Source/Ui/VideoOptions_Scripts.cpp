@@ -1,4 +1,5 @@
 #include "VideoOptions.h"
+#include "WoW/Source/ConsoleDevice/ConsoleDevice.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,7 @@
 #include "Engine/Source/Gx/CGxDevice/Types.h"
 #include "Engine/Source/Gx/CGxFormat.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Gx/WowDecompVk.h"
 #include "Engine/Source/Gx/Types.h"
 #include "Engine/Source/Os/System.h"
 #include "Engine/Source/Storm/H/stpl.h"
@@ -167,6 +169,25 @@ static int32_t Script_IsStereoVideoAvailable(lua_State* L) {
     return 1;
 }
 
+static int32_t Script_ReloadVulkanShaders(lua_State* L) {
+#if defined(WOWDECOMP_VULKAN)
+    if (g_theGxDevicePtr && g_theGxDevicePtr->DeviceApi() == GxApi_Vulkan) {
+        WowDecompVk_RequestShaderReload();
+    } else {
+        WowDecompVk_SetStatus("Vulkan is not the active renderer.");
+    }
+#else
+    WowDecompVk_SetStatus("This build has no Vulkan renderer.");
+#endif
+    lua_pushstring(L, WowDecompVk_Status());
+    return 1;
+}
+
+static int32_t Script_GetVulkanShaderStatus(lua_State* L) {
+    lua_pushstring(L, WowDecompVk_Status());
+    return 1;
+}
+
 // VERIFY: 8b3f6200 manual
 // OFFSET: 0x0054F050
 static void SetupFormats() {
@@ -223,35 +244,7 @@ static void SetupMultisampleFormats() {
         return;
     }
 
-    EGxApi api = GxDefaultApi();
-    CVar* gxApi = CVar::Lookup("gxApi");
-
-    if (gxApi) {
-        const char* name = gxApi->m_stringValue.m_str;
-
-        for (int32_t i = GxApi_OpenGl; i < GxApis_Last; i++) {
-            if (GxApiSupported(static_cast<EGxApi>(i)) && !SStrCmpI(name, g_gxApiNames[i], STORM_MAX_STR)) {
-                api = static_cast<EGxApi>(i);
-                break;
-            }
-        }
-    }
-
-    if (CmdLineGetBool(CMD_OPENGL) && GxApiSupported(GxApi_OpenGl)) {
-        api = GxApi_OpenGl;
-    }
-
-    if (CmdLineGetBool(CMD_D3D) && GxApiSupported(GxApi_D3d9)) {
-        api = GxApi_D3d9;
-    }
-
-    if (CmdLineGetBool(CMD_D3D9EX) && GxApiSupported(GxApi_D3d9Ex)) {
-        api = GxApi_D3d9Ex;
-    }
-
-    if (CmdLineGetBool(CMD_VULKAN) && GxApiSupported(GxApi_Vulkan)) {
-        api = GxApi_Vulkan;
-    }
+    EGxApi api = ConsoleDeviceApi();
 
     int32_t colorBits = 0;
     int32_t depthBits = 0;
@@ -439,7 +432,7 @@ static int32_t Script_GetCurrentMultisampleFormat(lua_State* L) {
 
 // VERIFY: 1162e2e5 manual
 // OFFSET: 0x0054ED80
-static int32_t Script_SetupFullscreenScale(lua_State* L) {
+int32_t Script_SetupFullscreenScale(lua_State* L) {
     if (lua_type(L, 1) != LUA_TTABLE) {
         luaL_error(L, "Usage: SetupFullscreenScale(frame)");
         return 0;
@@ -472,7 +465,7 @@ static int32_t Script_SetupFullscreenScale(lua_State* L) {
 
 // VERIFY: de05e80f manual
 // OFFSET: 0x0054F570
-static int32_t Script_SetScreenResolution(lua_State* L) {
+int32_t Script_SetScreenResolution(lua_State* L) {
     SetupFormats();
 
     uint32_t index = 0;
@@ -502,7 +495,7 @@ static int32_t Script_SetScreenResolution(lua_State* L) {
 
 // VERIFY: 64c2ee40 manual
 // OFFSET: 0x0054F980
-static int32_t Script_SetMultisampleFormat(lua_State* L) {
+int32_t Script_SetMultisampleFormat(lua_State* L) {
     SetupMultisampleFormats();
 
     uint32_t index = 0;
@@ -550,6 +543,8 @@ static FrameScript_Method s_scriptFunctions[] = {
     { "SetTerrainMip", &Script_SetTerrainMip },
     { "IsStereoVideoAvailable", &Script_IsStereoVideoAvailable },
     { "IsPlayerResolutionAvailable", &Script_IsPlayerResolutionAvailable },
+    { "ReloadVulkanShaders", &Script_ReloadVulkanShaders },
+    { "GetVulkanShaderStatus", &Script_GetVulkanShaderStatus },
 };
 
 // VERIFY: 9fc618b7 auto

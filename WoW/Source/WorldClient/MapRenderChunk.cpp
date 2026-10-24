@@ -1,5 +1,4 @@
 #include "MapRenderChunk.h"
-#include "WoW/Source/WorldClient/WorldConstants.h"
 #include <cmath>
 #include <cstring>
 #include "Engine/Source/Gx/CGxBuf.h"
@@ -7,6 +6,7 @@
 #include "Engine/Source/Gx/CGxPool.h"
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Base/Handle.h"
+#include "Engine/Source/Base/Profiler.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/Tempest/CImVector.h"
@@ -24,6 +24,12 @@
 #include "WoW/Source/WorldClient/MapLight.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
+#include "WoW/Source/WorldClient/WorldParam_CVarSlider.h"
+#include "Engine/Source/Base/Job/JobSystem.h"
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <vector>
 #if defined(_MSC_VER)
 #include <malloc.h>
 #else
@@ -105,6 +111,10 @@ CGxPool* CMapRenderChunk::s_gxIndexPool;
 // STATIC: 0x00D1D068
 CGxPool* CMapRenderChunk::s_gxVertexPool;
 
+static std::vector<CGxPool*> s_vertexSlabs;
+static std::vector<CGxPool*> s_indexSlabs;
+static uint32_t s_slotsPerSlab = 0;
+
 // STATIC: 0x00D1D06C
 EGxVertexBufferFormat CMapRenderChunk::s_gxBufVertexFormat;
 
@@ -132,6 +142,218 @@ CMapRenderChunk::SVertexShaderConstants CMapRenderChunk::s_vertexShaderConsts;
 // STATIC: 0x00D252F0
 TSGrowableArray<CMapChunkBufBlock> CMapRenderChunk::s_chunkBlockArray;
 
+namespace {
+
+struct OwnedFill {
+    CMapRenderChunk* chunk;
+    char* vertices;
+    uint16_t* indices;
+    CGxBuf* vertexBuf;
+    CGxBuf* indexBuf;
+};
+
+std::vector<CMapRenderChunk*> s_ownedFills;
+
+bool RangesOverlap(const char* a, uint32_t aSize, const char* b, uint32_t bSize) {
+    if (!a || !b || !aSize || !bSize) {
+        return false;
+    }
+
+    uintptr_t a0 = reinterpret_cast<uintptr_t>(a);
+    uintptr_t b0 = reinterpret_cast<uintptr_t>(b);
+    return a0 < b0 + bSize && b0 < a0 + aSize;
+}
+
+void FillLockedBufs(CMapRenderChunk* chunk, char* vertices, uint16_t* indices) {
+    if (vertices) {
+        C3Vector offset;
+
+        if (chunk->m_mapChunks[0]) {
+            chunk->m_mapChunks[0]->CreateVertices(vertices, 0, offset);
+        }
+
+        if (chunk->m_mapChunks[1]) {
+            offset.z = chunk->m_mapChunks[1]->m_topLeftCoords.z - chunk->m_mapChunks[0]->m_topLeftCoords.z;
+
+            if (chunk->m_unkFlags & 0x2) {
+                offset.y = -33.333332f;
+            } else {
+                offset.x = -33.333332f;
+            }
+
+            chunk->m_mapChunks[1]->CreateVertices(vertices, 145, offset);
+        }
+    }
+
+    if (indices) {
+        chunk->m_batch.m_primType = GxPrim_Triangles;
+        chunk->m_batch.m_start = 0;
+        chunk->m_batch.m_count = 0;
+        chunk->m_batch.m_minIndex = 0xFFFF;
+        chunk->m_batch.m_maxIndex = 0;
+
+        if (chunk->m_mapChunks[0]) {
+            chunk->m_mapChunks[0]->CreateIndices(indices, &chunk->m_batch);
+        }
+
+        if (chunk->m_mapChunks[1]) {
+            chunk->m_mapChunks[1]->CreateIndices(&indices[chunk->m_batch.m_count], &chunk->m_batch);
+        }
+    }
+}
+
+void FillOwnedRange(Job::Range range, void* user) {
+    OwnedFill* jobs = static_cast<OwnedFill*>(user);
+
+    for (uint32_t i = range.begin; i < range.end; ++i) {
+        FillLockedBufs(jobs[i].chunk, jobs[i].vertices, jobs[i].indices);
+    }
+}
+
+void CancelOwnedFill(CMapRenderChunk* chunk) {
+    for (size_t i = 0; i < s_ownedFills.size();) {
+        if (s_ownedFills[i] == chunk) {
+            s_ownedFills.erase(s_ownedFills.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+
+void ClearOwnedFills() {
+    s_ownedFills.clear();
+}
+
+void QueueOwnedFill(CMapRenderChunk* chunk) {
+    if (!chunk || !chunk->m_chunkBuf) {
+        return;
+    }
+
+    CGxBuf* vertexBuf = chunk->m_chunkBuf->m_vertexBuf;
+    CGxBuf* indexBuf = chunk->m_chunkBuf->m_indexBuf;
+
+    if (!vertexBuf || !indexBuf) {
+        return;
+    }
+
+    if (vertexBuf->m_hasData && vertexBuf->m_valid && indexBuf->m_hasData && indexBuf->m_valid) {
+        return;
+    }
+
+    for (CMapRenderChunk* queued : s_ownedFills) {
+        if (queued == chunk) {
+            return;
+        }
+    }
+
+    s_ownedFills.push_back(chunk);
+}
+
+void FlushOwnedFills() {
+    if (s_ownedFills.empty()) {
+        return;
+    }
+
+    std::vector<CMapRenderChunk*> pending;
+    pending.swap(s_ownedFills);
+
+    if (!g_theGxDevicePtr) {
+        s_ownedFills.swap(pending);
+        return;
+    }
+
+    CMapChunk::SetVertexColorFormat(g_theGxDevicePtr->Caps().m_colorFormat);
+
+    std::vector<OwnedFill> jobs;
+    jobs.reserve(pending.size());
+    bool overlap = false;
+
+    for (CMapRenderChunk* chunk : pending) {
+        if (!chunk->m_chunkBuf) {
+            continue;
+        }
+
+        CGxBuf* vertexBuf = chunk->m_chunkBuf->m_vertexBuf;
+        CGxBuf* indexBuf = chunk->m_chunkBuf->m_indexBuf;
+
+        if (!vertexBuf || !indexBuf) {
+            continue;
+        }
+
+        int32_t vertexReady = vertexBuf->m_hasData && vertexBuf->m_valid;
+        int32_t indexReady = indexBuf->m_hasData && indexBuf->m_valid;
+
+        if (vertexReady && indexReady) {
+            continue;
+        }
+
+        OwnedFill job;
+        job.chunk = chunk;
+        job.vertices = nullptr;
+        job.indices = nullptr;
+        job.vertexBuf = vertexBuf;
+        job.indexBuf = indexBuf;
+
+        if (!vertexReady) {
+            job.vertices = g_theGxDevicePtr->BufLock(vertexBuf);
+
+            for (const OwnedFill& prev : jobs) {
+                if (RangesOverlap(job.vertices, vertexBuf->m_size, prev.vertices, prev.vertexBuf->m_size)) {
+                    overlap = true;
+                }
+            }
+        }
+
+        if (!indexReady) {
+            job.indices = reinterpret_cast<uint16_t*>(g_theGxDevicePtr->BufLock(indexBuf));
+
+            for (const OwnedFill& prev : jobs) {
+                if (RangesOverlap(reinterpret_cast<char*>(job.indices), indexBuf->m_size, reinterpret_cast<char*>(prev.indices), prev.indexBuf->m_size)) {
+                    overlap = true;
+                }
+            }
+        }
+
+        jobs.push_back(job);
+    }
+
+    if (jobs.empty()) {
+        return;
+    }
+
+    if (overlap) {
+        for (OwnedFill& job : jobs) {
+            if (job.vertices) {
+                g_theGxDevicePtr->BufUnlock(job.vertexBuf, 0);
+            }
+
+            if (job.indices) {
+                g_theGxDevicePtr->BufUnlock(job.indexBuf, 0);
+            }
+
+            job.chunk->RenderPrepBufs(job.vertexBuf, job.indexBuf);
+        }
+
+        return;
+    }
+
+    Job::ParallelFor(static_cast<uint32_t>(jobs.size()), FillOwnedRange, jobs.data());
+
+    for (OwnedFill& job : jobs) {
+        if (job.vertices) {
+            g_theGxDevicePtr->BufUnlock(job.vertexBuf, 0);
+            job.vertexBuf->m_hasData = 1;
+        }
+
+        if (job.indices) {
+            g_theGxDevicePtr->BufUnlock(job.indexBuf, 0);
+            job.indexBuf->m_hasData = 1;
+        }
+    }
+}
+
+}
+
 // VERIFY: b7c2a1ad auto
 // OFFSET: 0x007B7320
 void CMapRenderChunk::SetDirty() {
@@ -141,6 +363,7 @@ void CMapRenderChunk::SetDirty() {
 // VERIFY: b36ae9fd auto
 // OFFSET: 0x007BA340
 void CMapRenderChunk::Initialize() {
+    Job::Init();
     CMapRenderChunk::s_bPoolsDirty = 1;
     CMapRenderChunk::s_gxBufVertexFormat = GxVBF_PN;
     CMapRenderChunk::s_chunkBatch.m_maxIndex = s_maxVertexCount - 1;
@@ -157,6 +380,144 @@ void CMapRenderChunk::Initialize() {
     memset(s_defaultShadowRow, 0, sizeof(s_defaultShadowRow));
 }
 
+struct SlabSlot {
+    CGxPool* vertex;
+    CGxPool* index;
+    uint32_t local;
+};
+
+static uint32_t VertexStride() {
+    return CMapRenderChunk::s_gxBufVertexFormat == GxVBF_PNC ? static_cast<uint32_t>(sizeof(CGxVertexPNC)) : static_cast<uint32_t>(sizeof(CGxVertexPN));
+}
+
+static uint32_t DiskSlots(int32_t radius) {
+    if (radius < 1) {
+        radius = 1;
+    }
+
+    uint64_t span = static_cast<uint64_t>(radius);
+    uint64_t count = (2ull * span * span + 1ull) & ~1ull;
+    const uint64_t continent = 1024ull * 1024ull;
+
+    if (count > continent) {
+        count = continent;
+    }
+
+    return static_cast<uint32_t>(count);
+}
+
+struct TerrainFit {
+    int32_t radius;
+    uint32_t slots;
+    int32_t resident;
+};
+
+static TerrainFit FitTerrain() {
+    int32_t radius = 1 - static_cast<int32_t>(World::EffectiveFarClip() * -0.03f);
+
+    if (radius < 1) {
+        radius = 1;
+    }
+
+    // ʕ •ᴥ•ʔ✿ Chunk indices run 0..1023. A wider disk is off the continent ✿ ʕ •ᴥ•ʔ
+    if (radius > 1023) {
+        radius = 1023;
+    }
+
+    // ʕ •ᴥ•ʔ✿ Full view stays inside the 64 sort buckets, about 2km. A 6km ring was the 3s scene pass ✿ ʕ •ᴥ•ʔ
+    const int32_t detailCap = CWorldParamSlider::ExtendedViewEnabled() ? 64 : 39;
+
+    if (radius > detailCap) {
+        radius = detailCap;
+    }
+
+    uint64_t heap = g_theGxDevicePtr ? g_theGxDevicePtr->ResidentHeapBytes() : 0;
+
+    if (!heap) {
+        if (radius > 160) {
+            radius = 160;
+        }
+
+        return { radius, DiskSlots(radius), 0 };
+    }
+
+    uint64_t perSlot = 145ull * VertexStride() + 1536ull;
+    uint64_t budget = heap - heap / 4;
+
+    if (budget < (256ull << 20)) {
+        budget = heap / 2;
+    }
+
+    uint64_t fitSlots = perSlot ? (budget / perSlot) & ~1ull : 0;
+
+    if (fitSlots < 2) {
+        fitSlots = 2;
+    }
+
+    uint32_t slots = DiskSlots(radius);
+
+    if (slots > fitSlots) {
+        slots = static_cast<uint32_t>(fitSlots > 0xffffffffull ? (0xffffffffull & ~1ull) : fitSlots);
+        int32_t clamped = static_cast<int32_t>(std::sqrt(static_cast<double>(slots) * 0.5));
+
+        if (clamped < 1) {
+            clamped = 1;
+        }
+
+        if (clamped < radius) {
+            radius = clamped;
+        }
+
+        uint32_t shrunk = DiskSlots(radius);
+
+        if (shrunk < slots) {
+            slots = shrunk;
+        }
+    }
+
+    return { radius, slots, 1 };
+}
+
+static SlabSlot SlabSlotFor(uint32_t slot) {
+    uint32_t slab = 0;
+    uint32_t local = slot;
+
+    if (s_slotsPerSlab) {
+        slab = slot / s_slotsPerSlab;
+        local = slot - slab * s_slotsPerSlab;
+    }
+
+    SlabSlot out;
+    out.vertex = slab < s_vertexSlabs.size() ? s_vertexSlabs[slab] : CMapRenderChunk::s_gxVertexPool;
+    out.index = slab < s_indexSlabs.size() ? s_indexSlabs[slab] : CMapRenderChunk::s_gxIndexPool;
+    out.local = local;
+    return out;
+}
+
+static int32_t IsVertexSlab(CGxPool* pool) {
+    for (CGxPool* slab : s_vertexSlabs) {
+        if (slab == pool) {
+            return 1;
+        }
+    }
+
+    return pool == CMapRenderChunk::s_gxVertexPool;
+}
+
+static int32_t IsIndexSlab(CGxPool* pool) {
+    for (CGxPool* slab : s_indexSlabs) {
+        if (slab == pool) {
+            return 1;
+        }
+    }
+
+    return pool == CMapRenderChunk::s_gxIndexPool;
+}
+
+int32_t CMapRenderChunk::DetailChunkRadius() {
+    return FitTerrain().radius;
+}
+
 // VERIFY: 73f06b5c manual
 // OFFSET: 0x007BA5A0
 void CMapRenderChunk::Destroy() {
@@ -165,15 +526,21 @@ void CMapRenderChunk::Destroy() {
     CMapRenderChunk::s_pnEstimateIndex = 0;
     CMapRenderChunk::s_bPoolsDirty = 1;
 
-    if (CMapRenderChunk::s_gxVertexPool) {
-        g_theGxDevicePtr->PoolDestroy(CMapRenderChunk::s_gxVertexPool);
-        CMapRenderChunk::s_gxVertexPool = nullptr;
+    if (g_theGxDevicePtr) {
+        for (CGxPool* pool : s_vertexSlabs) {
+            g_theGxDevicePtr->PoolDestroy(pool);
+        }
+
+        for (CGxPool* pool : s_indexSlabs) {
+            g_theGxDevicePtr->PoolDestroy(pool);
+        }
     }
 
-    if (CMapRenderChunk::s_gxIndexPool) {
-        g_theGxDevicePtr->PoolDestroy(CMapRenderChunk::s_gxIndexPool);
-        CMapRenderChunk::s_gxIndexPool = nullptr;
-    }
+    s_vertexSlabs.clear();
+    s_indexSlabs.clear();
+    s_slotsPerSlab = 0;
+    CMapRenderChunk::s_gxVertexPool = nullptr;
+    CMapRenderChunk::s_gxIndexPool = nullptr;
 }
 
 // VERIFY: 61c7e992 manual
@@ -397,9 +764,10 @@ CMapChunkBuf* CMapRenderChunk::AllocBuf(int32_t flags, CMapRenderChunk* renderCh
             return buf;
         }
 
-        uint32_t stride = CMapRenderChunk::s_gxBufVertexFormat == GxVBF_PNC ? sizeof(CGxVertexPNC) : sizeof(CGxVertexPN);
-        buf->m_vertexBuf = g_theGxDevicePtr->BufCreate(CMapRenderChunk::s_gxVertexPool, stride, 290, 145 * stride * block->m_vertexCount);
-        buf->m_indexBuf = g_theGxDevicePtr->BufCreate(CMapRenderChunk::s_gxIndexPool, 2, 1536, 1536 * block->m_vertexCount);
+        uint32_t stride = VertexStride();
+        SlabSlot slot = SlabSlotFor(block->m_vertexCount);
+        buf->m_vertexBuf = g_theGxDevicePtr->BufCreate(slot.vertex, stride, 290, 145 * stride * slot.local);
+        buf->m_indexBuf = g_theGxDevicePtr->BufCreate(slot.index, 2, 1536, 1536 * slot.local);
         return buf;
     }
 
@@ -429,13 +797,14 @@ CMapChunkBuf* CMapRenderChunk::AllocBuf(int32_t flags, CMapRenderChunk* renderCh
         block->m_bufs[0].m_indexBuf = nullptr;
     }
 
-    uint32_t stride = CMapRenderChunk::s_gxBufVertexFormat == GxVBF_PNC ? sizeof(CGxVertexPNC) : sizeof(CGxVertexPN);
+    uint32_t stride = VertexStride();
     CMapChunkBuf* buf;
 
     for (int32_t i = 0; i < 2; i++) {
         buf = &block->m_bufs[i];
-        buf->m_vertexBuf = g_theGxDevicePtr->BufCreate(CMapRenderChunk::s_gxVertexPool, stride, 145, 145 * stride * (block->m_vertexCount + i));
-        buf->m_indexBuf = g_theGxDevicePtr->BufCreate(CMapRenderChunk::s_gxIndexPool, 2, 768, 1536 * (block->m_vertexCount + i));
+        SlabSlot slot = SlabSlotFor(block->m_vertexCount + i);
+        buf->m_vertexBuf = g_theGxDevicePtr->BufCreate(slot.vertex, stride, 145, 145 * stride * slot.local);
+        buf->m_indexBuf = g_theGxDevicePtr->BufCreate(slot.index, 2, 768, 1536 * slot.local);
         buf->m_unkFlags = 0;
         buf->m_renderChunk = nullptr;
 
@@ -452,6 +821,8 @@ CMapChunkBuf* CMapRenderChunk::AllocBuf(int32_t flags, CMapRenderChunk* renderCh
 // VERIFY: e18a2023 manual
 // OFFSET: 0x007B9560
 void CMapRenderChunk::PurgeChunkBufBlocks() {
+    CMapChunk::FlushQueuedVisibility();
+
     for (uint32_t i = 0; i < CMapRenderChunk::s_chunkBlockArray.Count(); i++) {
         CMapChunkBufBlock& block = CMapRenderChunk::s_chunkBlockArray[i];
 
@@ -565,6 +936,7 @@ CMapChunkBufBlock::~CMapChunkBufBlock() {
 // VERIFY: a8d77235 manual
 // OFFSET: 0x007B9D60
 CMapRenderChunk::~CMapRenderChunk() {
+    CancelOwnedFill(this);
     this->FreeBuf();
     this->FreeLayers();
 
@@ -584,6 +956,14 @@ CMapRenderChunk::~CMapRenderChunk() {
 // VERIFY: 2d552482 manual
 // OFFSET: 0x007BA600
 void CMapRenderChunk::UpdatePools() {
+    CMapChunk::FlushQueuedVisibility();
+
+    if (CMapRenderChunk::s_bPoolsDirty) {
+        ClearOwnedFills();
+    } else {
+        FlushOwnedFills();
+    }
+
     if (!CMapRenderChunk::s_bPoolsDirty) {
         return;
     }
@@ -591,15 +971,62 @@ void CMapRenderChunk::UpdatePools() {
     CMap::ClearAllRenderChunks();
     CMapRenderChunk::Destroy();
 
-    int32_t radius = 1 - static_cast<int32_t>(World::s_farClip * -OO_COORD_TO_CHUNK);
-    uint32_t count = (2 * radius * radius + 1) & ~1u;
+    TerrainFit fit = FitTerrain();
+    uint32_t stride = VertexStride();
+    uint32_t count = fit.slots;
+
+    if (count < 2) {
+        count = 2;
+    }
 
     CMapRenderChunk::s_pnEstimateVertex = 145 * count;
     CMapRenderChunk::s_pnEstimateIndex = 768 * count;
 
-    uint32_t stride = CMapRenderChunk::s_gxBufVertexFormat == GxVBF_PNC ? sizeof(CGxVertexPNC) : sizeof(CGxVertexPN);
-    CMapRenderChunk::s_gxVertexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Vertex, GxPoolUsage_Dynamic, CMapRenderChunk::s_pnEstimateVertex * stride, GxPoolHintBit_Unk3, "CMapRenderChunk_vtx");
-    CMapRenderChunk::s_gxIndexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Index, GxPoolUsage_Dynamic, CMapRenderChunk::s_pnEstimateIndex * 2, GxPoolHintBit_Unk3, "CMapRenderChunk_idx");
+    // ʕ •ᴥ•ʔ✿ One CGxPool size is a signed 32-bit byte count. Slabs stay under that and under a driver-sized alloc ✿ ʕ •ᴥ•ʔ
+    const uint32_t kSlabBytes = 768u * 1024u * 1024u;
+    uint32_t vertexPer = 145u * stride;
+    uint32_t indexPer = 1536u;
+    uint32_t slotsPer = vertexPer ? kSlabBytes / vertexPer : 2u;
+    uint32_t indexSlots = indexPer ? kSlabBytes / indexPer : slotsPer;
+
+    if (indexSlots < slotsPer) {
+        slotsPer = indexSlots;
+    }
+
+    slotsPer &= ~1u;
+
+    if (slotsPer < 2) {
+        slotsPer = 2;
+    }
+
+    s_slotsPerSlab = slotsPer;
+    uint32_t remaining = count;
+
+    while (remaining) {
+        uint32_t n = remaining > slotsPer ? slotsPer : remaining;
+        n &= ~1u;
+
+        if (!n) {
+            break;
+        }
+
+        CGxPool* vertexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Vertex, GxPoolUsage_Dynamic, static_cast<int32_t>(n * vertexPer), GxPoolHintBit_Unk3, "CMapRenderChunk_vtx");
+        CGxPool* indexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Index, GxPoolUsage_Dynamic, static_cast<int32_t>(n * indexPer), GxPoolHintBit_Unk3, "CMapRenderChunk_idx");
+        vertexPool->m_resident = fit.resident;
+        indexPool->m_resident = fit.resident;
+        s_vertexSlabs.push_back(vertexPool);
+        s_indexSlabs.push_back(indexPool);
+        remaining -= n;
+    }
+
+    CMapRenderChunk::s_gxVertexPool = s_vertexSlabs.empty() ? nullptr : s_vertexSlabs[0];
+    CMapRenderChunk::s_gxIndexPool = s_indexSlabs.empty() ? nullptr : s_indexSlabs[0];
+
+    std::fprintf(stderr, "terrain resident: radius=%d slots=%u slabs=%zu heapMiB=%llu\n",
+        fit.radius,
+        count,
+        s_vertexSlabs.size(),
+        static_cast<unsigned long long>((g_theGxDevicePtr ? g_theGxDevicePtr->ResidentHeapBytes() : 0) >> 20));
 
     CMapRenderChunk::s_chunkBlockArray.SetCount(count / 2);
 
@@ -621,47 +1048,31 @@ void CMapRenderChunk::RenderPrepBufs(CGxBuf* vertexBuf, CGxBuf* indexBuf) {
     int32_t vertexReady = vertexBuf->m_hasData && vertexBuf->m_valid;
     int32_t indexReady = indexBuf->m_hasData && indexBuf->m_valid;
 
+    if (vertexReady && indexReady) {
+        return;
+    }
+
+    CMapChunk::SetVertexColorFormat(g_theGxDevicePtr->Caps().m_colorFormat);
+
+    char* vertices = nullptr;
+    uint16_t* indices = nullptr;
+
     if (!vertexReady) {
-        C3Vector offset;
-        char* vertices = g_theGxDevicePtr->BufLock(vertexBuf);
+        vertices = g_theGxDevicePtr->BufLock(vertexBuf);
+    }
 
-        if (this->m_mapChunks[0]) {
-            this->m_mapChunks[0]->CreateVertices(vertices, 0, offset);
-        }
+    if (!indexReady) {
+        indices = reinterpret_cast<uint16_t*>(g_theGxDevicePtr->BufLock(indexBuf));
+    }
 
-        if (this->m_mapChunks[1]) {
-            offset.z = this->m_mapChunks[1]->m_topLeftCoords.z - this->m_mapChunks[0]->m_topLeftCoords.z;
+    FillLockedBufs(this, vertices, indices);
 
-            if (this->m_unkFlags & 0x2) {
-                offset.y = -33.333332f;
-            } else {
-                offset.x = -33.333332f;
-            }
-
-            this->m_mapChunks[1]->CreateVertices(vertices, 145, offset);
-        }
-
+    if (!vertexReady) {
         g_theGxDevicePtr->BufUnlock(vertexBuf, 0);
         vertexBuf->m_hasData = 1;
     }
 
     if (!indexReady) {
-        this->m_batch.m_primType = GxPrim_Triangles;
-        this->m_batch.m_start = 0;
-        this->m_batch.m_count = 0;
-        this->m_batch.m_minIndex = 0xFFFF;
-        this->m_batch.m_maxIndex = 0;
-
-        uint16_t* indices = reinterpret_cast<uint16_t*>(g_theGxDevicePtr->BufLock(indexBuf));
-
-        if (this->m_mapChunks[0]) {
-            this->m_mapChunks[0]->CreateIndices(indices, &this->m_batch);
-        }
-
-        if (this->m_mapChunks[1]) {
-            this->m_mapChunks[1]->CreateIndices(&indices[this->m_batch.m_count], &this->m_batch);
-        }
-
         g_theGxDevicePtr->BufUnlock(indexBuf, 0);
         indexBuf->m_hasData = 1;
     }
@@ -691,6 +1102,7 @@ void CMapRenderChunk::UseStreamingBufs() {
 // VERIFY: fdc9dc29 manual
 // OFFSET: 0x007D04A0
 void CMapRenderChunk::RenderSetup(int32_t a2) {
+    FlushOwnedFills();
     this->m_lastUpdateTime = 0.0f;
     this->AllocLayerTextures();
 
@@ -777,7 +1189,8 @@ void CMapRenderChunk::RenderPrep() {
 
     if (this->m_chunkBuf) {
         CMapRenderChunk::s_bufList.LinkToHead(this->m_chunkBuf->m_block);
-        this->RenderPrepBufs(this->m_chunkBuf->m_vertexBuf, this->m_chunkBuf->m_indexBuf);
+        // -- ʕ •ᴥ•ʔ✿ Main thread owns the buffer; workers fill it before the draw ✿ ʕ •ᴥ•ʔ
+        QueueOwnedFill(this);
     }
 
     if (!this->m_layersCount) {
@@ -2008,7 +2421,7 @@ void CMapRenderChunk::InitializeVertexShaderConstants(const C44Matrix& world, co
         consts.m_sunDir.y = dir.y;
         consts.m_sunDir.z = dir.z;
         consts.m_sunDir.w = 1.0f;
-        consts.m_sunSpecularW = TERRAIN_SPEC_EXP;
+        consts.m_sunSpecularW = 20.0f;
     } else {
         consts.m_sunAmbient = C3Vector(1.0f, 1.0f, 1.0f);
         consts.m_sunAmbientW = 1.0f;
@@ -2203,7 +2616,7 @@ void CMapRenderChunk::RenderMultiPassAdditive(CMapRenderChunk* renderChunk) {
         g_theGxDevicePtr->Draw(&renderChunk->m_batch, 1);
 
         if (i == 0 && specular) {
-            GxRsSet(GxRs_TexGen0, GxTexGen_World);
+            GxRsSet(GxRs_TexGen0, GxTexGen_EyeLinear);
             GxRsSet(GxRs_TextureShader0, 1);
         }
 
@@ -2219,6 +2632,724 @@ void CMapRenderChunk::RenderMultiPassAdditive(CMapRenderChunk* renderChunk) {
     GxRsSet(GxRs_FogColor, *reinterpret_cast<int32_t*>(&CMapRenderChunk::s_fogColor));
     GxRsSet(GxRs_Texture0, 0);
     GxRsSet(GxRs_Texture1, 0);
+}
+
+struct TerrainCapture {
+    CMapRenderChunk* chunk;
+    C44Matrix world;
+    C44Matrix tex0;
+    C44Matrix tex1;
+    float lightPos[4][4];
+    float lightDiffuse[4][4];
+    float lightAmbient[4][4];
+    float lightAtten[4][4];
+    float fogStart;
+    float fogEnd;
+    uint32_t fogColor;
+    int32_t fog;
+    uint32_t indexCount;
+    uint32_t firstIndex;
+    int32_t baseVertex;
+};
+
+static std::vector<TerrainCapture> s_terrainBatch;
+
+namespace {
+
+struct TerrainGroupKey {
+    CTexture* texture;
+    CTexture* layerTexture;
+    int32_t fog;
+    uint32_t fogColor;
+    float fogStart;
+    float fogEnd;
+
+    bool operator==(const TerrainGroupKey& other) const {
+        return texture == other.texture && layerTexture == other.layerTexture && fog == other.fog && fogColor == other.fogColor && fogStart == other.fogStart && fogEnd == other.fogEnd;
+    }
+};
+
+TerrainGroupKey MakeTerrainGroupKey(const TerrainCapture& cap, uint32_t layer, int32_t bindless) {
+    const CMapRenderChunkLayer& chunkLayer = cap.chunk->m_layers[layer];
+    TerrainGroupKey key;
+    key.texture = bindless ? nullptr : chunkLayer.m_texture;
+    key.layerTexture = bindless ? (chunkLayer.m_layerTexture ? reinterpret_cast<CTexture*>(1) : nullptr) : chunkLayer.m_layerTexture;
+    key.fog = cap.fog;
+    key.fogColor = cap.fogColor;
+    key.fogStart = cap.fogStart;
+    key.fogEnd = cap.fogEnd;
+    return key;
+}
+
+std::vector<GxTerrainDraw> s_terrainDraws;
+std::vector<GxTerrainDraw> s_shadowDraws;
+std::vector<size_t> s_shadowQueued;
+std::vector<uint8_t> s_meshTaken;
+std::vector<size_t> s_terrainQueued;
+std::vector<size_t> s_terrainOrder;
+std::vector<uint8_t> s_terrainOwnShadow;
+
+struct TerrainLayerPlan {
+    std::vector<TerrainGroupKey> keys;
+    std::vector<std::vector<size_t>> members;
+};
+
+std::vector<TerrainLayerPlan> s_layerPlans;
+std::vector<CMapRenderChunk*> s_planChunks;
+std::vector<uint32_t> s_planLayerCounts;
+std::vector<CTexture*> s_planTextures;
+std::vector<CTexture*> s_planAlphas;
+std::vector<int32_t> s_planFog;
+std::vector<uint32_t> s_planFogColor;
+std::vector<float> s_planFogStart;
+std::vector<float> s_planFogEnd;
+int32_t s_planBindless = -1;
+int32_t s_planValid = 0;
+
+static int32_t TerrainPlanMatches(int32_t bindless) {
+    if (!s_planValid || s_planBindless != bindless || s_planChunks.size() != s_terrainBatch.size()) {
+        return 0;
+    }
+
+    size_t tex = 0;
+
+    for (size_t i = 0; i < s_terrainBatch.size(); ++i) {
+        const TerrainCapture& cap = s_terrainBatch[i];
+        uint32_t layers = cap.chunk->m_layersCount;
+
+        if (s_planChunks[i] != cap.chunk || s_planLayerCounts[i] != layers || s_planFog[i] != cap.fog || s_planFogColor[i] != cap.fogColor || s_planFogStart[i] != cap.fogStart || s_planFogEnd[i] != cap.fogEnd) {
+            return 0;
+        }
+
+        for (uint32_t layer = 0; layer < layers; ++layer, ++tex) {
+            if (tex >= s_planTextures.size() || s_planTextures[tex] != cap.chunk->m_layers[layer].m_texture || s_planAlphas[tex] != cap.chunk->m_layers[layer].m_layerTexture) {
+                return 0;
+            }
+        }
+    }
+
+    return tex == s_planTextures.size();
+}
+
+static void BuildTerrainPlans(uint32_t maxLayers, int32_t bindless) {
+    s_layerPlans.clear();
+    s_layerPlans.resize(maxLayers);
+    s_planChunks.resize(s_terrainBatch.size());
+    s_planLayerCounts.resize(s_terrainBatch.size());
+    s_planTextures.clear();
+    s_planAlphas.clear();
+    s_planFog.resize(s_terrainBatch.size());
+    s_planFogColor.resize(s_terrainBatch.size());
+    s_planFogStart.resize(s_terrainBatch.size());
+    s_planFogEnd.resize(s_terrainBatch.size());
+
+    for (size_t i = 0; i < s_terrainBatch.size(); ++i) {
+        s_planChunks[i] = s_terrainBatch[i].chunk;
+        s_planLayerCounts[i] = s_terrainBatch[i].chunk->m_layersCount;
+        s_planFog[i] = s_terrainBatch[i].fog;
+        s_planFogColor[i] = s_terrainBatch[i].fogColor;
+        s_planFogStart[i] = s_terrainBatch[i].fogStart;
+        s_planFogEnd[i] = s_terrainBatch[i].fogEnd;
+
+        for (uint32_t layer = 0; layer < s_planLayerCounts[i]; ++layer) {
+            s_planTextures.push_back(s_terrainBatch[i].chunk->m_layers[layer].m_texture);
+            s_planAlphas.push_back(s_terrainBatch[i].chunk->m_layers[layer].m_layerTexture);
+        }
+    }
+
+    for (uint32_t layer = 0; layer < maxLayers; ++layer) {
+        TerrainLayerPlan& plan = s_layerPlans[layer];
+
+        for (size_t index = 0; index < s_terrainBatch.size(); ++index) {
+            const TerrainCapture& cap = s_terrainBatch[index];
+
+            if (layer >= cap.chunk->m_layersCount) {
+                continue;
+            }
+
+            TerrainGroupKey key = MakeTerrainGroupKey(cap, layer, bindless);
+            size_t group = 0;
+
+            while (group < plan.keys.size() && !(plan.keys[group] == key)) {
+                ++group;
+            }
+
+            if (group == plan.keys.size()) {
+                plan.keys.push_back(key);
+                plan.members.emplace_back();
+            }
+
+            plan.members[group].push_back(index);
+        }
+    }
+
+    s_planBindless = bindless;
+    s_planValid = 1;
+}
+
+}
+
+static void CaptureLights(TerrainCapture& cap) {
+    memset(cap.lightPos, 0, sizeof(cap.lightPos));
+    memset(cap.lightDiffuse, 0, sizeof(cap.lightDiffuse));
+    memset(cap.lightAmbient, 0, sizeof(cap.lightAmbient));
+    memset(cap.lightAtten, 0, sizeof(cap.lightAtten));
+
+    for (uint32_t i = 0; i < 4; ++i) {
+        const CGxApiLight& light = g_theGxDevicePtr->m_lights[i];
+
+        if (!light.m_enable) {
+            continue;
+        }
+
+        cap.lightPos[i][0] = light.m_dir.x;
+        cap.lightPos[i][1] = light.m_dir.y;
+        cap.lightPos[i][2] = light.m_dir.z;
+        cap.lightPos[i][3] = light.m_dir.w == 1.0f ? 1.0f : 0.0f;
+        cap.lightDiffuse[i][0] = light.m_dirColor.x;
+        cap.lightDiffuse[i][1] = light.m_dirColor.y;
+        cap.lightDiffuse[i][2] = light.m_dirColor.z;
+        cap.lightDiffuse[i][3] = 1.0f;
+        cap.lightAmbient[i][0] = light.m_ambColor.x;
+        cap.lightAmbient[i][1] = light.m_ambColor.y;
+        cap.lightAmbient[i][2] = light.m_ambColor.z;
+        cap.lightAtten[i][0] = light.m_constantAttenuation;
+        cap.lightAtten[i][1] = light.m_linearAttenuation;
+        cap.lightAtten[i][2] = light.m_quadraticAttenuation;
+    }
+}
+
+static void ApplyChunkFog(const TerrainCapture& cap) {
+    GxRsSet(GxRs_FogStart, cap.fogStart);
+    GxRsSet(GxRs_FogEnd, cap.fogEnd);
+    GxRsSet(GxRs_FogColor, static_cast<int32_t>(cap.fogColor));
+    GxRsSet(GxRs_Fog, cap.fog);
+}
+
+// ʕ •ᴥ•ʔ✿ Chunk tex matrices are a swapped scale plus a translation. The general 4x4 product spends most of its multiplies on zeros ✿ ʕ •ᴥ•ʔ
+static void MulEyeTex(C44Matrix& out, const C44Matrix& eye, const C44Matrix& tex) {
+    out.a0 = eye.a1 * tex.b0 + eye.a3 * tex.d0;
+    out.a1 = eye.a0 * tex.a1 + eye.a3 * tex.d1;
+    out.a2 = eye.a2 * tex.c2 + eye.a3 * tex.d2;
+    out.a3 = eye.a3;
+    out.b0 = eye.b1 * tex.b0 + eye.b3 * tex.d0;
+    out.b1 = eye.b0 * tex.a1 + eye.b3 * tex.d1;
+    out.b2 = eye.b2 * tex.c2 + eye.b3 * tex.d2;
+    out.b3 = eye.b3;
+    out.c0 = eye.c1 * tex.b0 + eye.c3 * tex.d0;
+    out.c1 = eye.c0 * tex.a1 + eye.c3 * tex.d1;
+    out.c2 = eye.c2 * tex.c2 + eye.c3 * tex.d2;
+    out.c3 = eye.c3;
+    out.d0 = eye.d1 * tex.b0 + eye.d3 * tex.d0;
+    out.d1 = eye.d0 * tex.a1 + eye.d3 * tex.d1;
+    out.d2 = eye.d2 * tex.c2 + eye.d3 * tex.d2;
+    out.d3 = eye.d3;
+}
+
+static void FillTerrainDraw(GxTerrainDraw& draw, const TerrainCapture& cap, const C44Matrix* eye0, const C44Matrix* eye1) {
+    draw.world = cap.world;
+
+    // -- ʕ •ᴥ•ʔ✿ Eye-linear texgen is one view inverse for the whole flush. Per chunk it is that matrix times the layer matrix. ✿ ʕ •ᴥ•ʔ
+    if (eye0 && eye1) {
+        MulEyeTex(draw.tex0, *eye0, cap.tex0);
+        MulEyeTex(draw.tex1, *eye1, cap.tex1);
+    } else {
+        GxXformSet(GxXform_Tex0, cap.tex0);
+        GxXformSet(GxXform_Tex1, cap.tex1);
+        g_theGxDevicePtr->ResolveTexMatrix(0, draw.tex0);
+        g_theGxDevicePtr->ResolveTexMatrix(1, draw.tex1);
+    }
+    memcpy(draw.lightPos, cap.lightPos, sizeof(draw.lightPos));
+    memcpy(draw.lightDiffuse, cap.lightDiffuse, sizeof(draw.lightDiffuse));
+    memcpy(draw.lightAmbient, cap.lightAmbient, sizeof(draw.lightAmbient));
+    memcpy(draw.lightAtten, cap.lightAtten, sizeof(draw.lightAtten));
+    draw.indexCount = cap.indexCount;
+    draw.firstIndex = cap.firstIndex;
+    draw.baseVertex = cap.baseVertex;
+}
+
+static void DrawTerrainChunk(const TerrainCapture& cap) {
+    ApplyChunkFog(cap);
+    GxXformSet(GxXform_World, cap.world);
+    GxXformSet(GxXform_Tex0, cap.tex0);
+    GxXformSet(GxXform_Tex1, cap.tex1);
+    GxPrimVertexPtr(cap.chunk->m_chunkBuf->m_vertexBuf, CMapRenderChunk::s_gxBufVertexFormat);
+    g_theGxDevicePtr->PrimIndexPtr(cap.chunk->m_chunkBuf->m_indexBuf);
+    g_theGxDevicePtr->Draw(&cap.chunk->m_batch, 1);
+}
+
+static int32_t SameTerrainGroup(const TerrainCapture& a, const TerrainCapture& b) {
+    return a.chunk->m_chunkBuf->m_vertexBuf->m_pool == b.chunk->m_chunkBuf->m_vertexBuf->m_pool && a.chunk->m_chunkBuf->m_indexBuf->m_pool == b.chunk->m_chunkBuf->m_indexBuf->m_pool && a.fog == b.fog && a.fogColor == b.fogColor && a.fogStart == b.fogStart && a.fogEnd == b.fogEnd;
+}
+
+static void DrawCapturedLayers(const TerrainCapture& cap) {
+    ApplyChunkFog(cap);
+    GxXformSet(GxXform_World, cap.world);
+    GxPrimVertexPtr(cap.chunk->m_chunkBuf->m_vertexBuf, CMapRenderChunk::s_gxBufVertexFormat);
+    g_theGxDevicePtr->PrimIndexPtr(cap.chunk->m_chunkBuf->m_indexBuf);
+    CMapRenderChunk::RenderMultiPassAlpha(cap.chunk);
+}
+
+static int32_t FillChunkLayers(GxTerrainDraw& draw, const TerrainCapture& cap, const C44Matrix* eye0, const C44Matrix* eye1) {
+    uint32_t count = cap.chunk->m_layersCount;
+
+    if (!count) {
+        return 0;
+    }
+
+    if (count > 4) {
+        count = 4;
+    }
+
+    FillTerrainDraw(draw, cap, eye0, eye1);
+    draw.layerCount = count;
+
+    for (uint32_t i = 0; i < 4; ++i) {
+        draw.layerTex[i] = ~0u;
+        draw.layerAlpha[i] = ~0u;
+    }
+
+    for (uint32_t i = 0; i < count; ++i) {
+        CMapRenderChunkLayer* layer = &cap.chunk->m_layers[i];
+        CTexture* texture = layer->m_texture;
+        CGxTex* color = texture && !(texture->m_flags & 4) && texture->m_gxTex ? texture->m_gxTex : TextureGetGxTex(texture, 0, nullptr);
+
+        if (color) {
+            GxTexSetWrap(color, GxTex_Wrap, GxTex_Wrap);
+        }
+
+        uint32_t slot = g_theGxDevicePtr->TerrainTextureSlot(color);
+
+        if (slot == ~0u) {
+            return 0;
+        }
+
+        draw.layerTex[i] = slot;
+
+        if (layer->m_layerTexture) {
+            CTexture* alphaTex = layer->m_layerTexture;
+            CGxTex* alpha = alphaTex && !(alphaTex->m_flags & 4) && alphaTex->m_gxTex ? alphaTex->m_gxTex : TextureGetGxTex(alphaTex, 0, nullptr);
+            uint32_t alphaSlot = g_theGxDevicePtr->TerrainTextureSlot(alpha);
+
+            if (alphaSlot == ~0u) {
+                return 0;
+            }
+
+            draw.layerAlpha[i] = alphaSlot;
+        }
+    }
+
+    draw.texIndex0 = draw.layerTex[0];
+    draw.texIndex1 = draw.layerAlpha[0];
+    return 1;
+}
+
+struct TerrainSortKey {
+    uintptr_t vertex;
+    uintptr_t index;
+    uint32_t fogColor;
+    int32_t fog;
+    float fogStart;
+    float fogEnd;
+    uint32_t order;
+};
+
+static std::vector<TerrainSortKey> s_sortKeys;
+
+static void DrawShadowGroup(const GxTerrainDraw* draws, uint32_t offset, uint32_t count) {
+    if (!(CWorld::enables & Enable_Shadow) || !g_theGxDevicePtr->TerrainBindless() || !count) {
+        return;
+    }
+
+    CGxTex* mod = CWorld::shadowModTexture ? TextureGetGxTex(CWorld::shadowModTexture, 0, nullptr) : nullptr;
+    uint32_t modSlot = g_theGxDevicePtr->TerrainTextureSlot(mod);
+
+    if (modSlot == ~0u) {
+        return;
+    }
+
+    s_shadowDraws.clear();
+    s_shadowQueued.clear();
+
+    for (uint32_t i = 0; i < count; ++i) {
+        size_t index = s_terrainQueued[offset + i];
+        CTexture* texture = s_terrainBatch[index].chunk->m_shadowTexture;
+
+        if (!texture) {
+            continue;
+        }
+
+        CGxTex* shadow = !(texture->m_flags & 4) && texture->m_gxTex ? texture->m_gxTex : TextureGetGxTex(texture, 0, nullptr);
+        uint32_t slot = g_theGxDevicePtr->TerrainTextureSlot(shadow);
+
+        if (slot == ~0u) {
+            continue;
+        }
+
+        GxTerrainDraw draw = draws[i];
+        draw.layerCount = 0;
+        draw.texIndex0 = modSlot;
+        draw.texIndex1 = slot;
+        s_shadowDraws.push_back(draw);
+        s_shadowQueued.push_back(index);
+    }
+
+    if (s_shadowDraws.empty()) {
+        return;
+    }
+
+    // ʕ •ᴥ•ʔ✿ The old path was one Vulkan draw per chunk. The shadow maps already live in the bindless table ✿ ʕ •ᴥ•ʔ
+    GxRsSet(GxRs_BlendingMode, GxBlend_Alpha);
+    GxUpdateAlphaRef(GxRs_AlphaRef);
+
+    if (!g_theGxDevicePtr->DrawTerrainBatch(s_shadowDraws.data(), static_cast<uint32_t>(s_shadowDraws.size()), 3)) {
+        return;
+    }
+
+    for (size_t index : s_shadowQueued) {
+        s_terrainOwnShadow[index] = 1;
+    }
+}
+
+static void FlushTerrainComposite(const C44Matrix* eye0, const C44Matrix* eye1) {
+    // -- ʕ •ᴥ•ʔ✿ One indirect command per chunk. The fragment shader lerps every layer, so the per-layer setup is gone ✿ ʕ •ᴥ•ʔ
+    size_t count = s_terrainBatch.size();
+    s_terrainOwnShadow.assign(count, 0);
+    s_terrainOrder.resize(count);
+    s_sortKeys.resize(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        const TerrainCapture& cap = s_terrainBatch[i];
+        TerrainSortKey& key = s_sortKeys[i];
+        key.vertex = reinterpret_cast<uintptr_t>(cap.chunk->m_chunkBuf->m_vertexBuf->m_pool);
+        key.index = reinterpret_cast<uintptr_t>(cap.chunk->m_chunkBuf->m_indexBuf->m_pool);
+        key.fogColor = cap.fogColor;
+        key.fog = cap.fog;
+        key.fogStart = cap.fogStart;
+        key.fogEnd = cap.fogEnd;
+        key.order = static_cast<uint32_t>(i);
+    }
+
+    std::sort(s_sortKeys.begin(), s_sortKeys.end(), [](const TerrainSortKey& a, const TerrainSortKey& b) {
+        if (a.vertex != b.vertex) {
+            return a.vertex < b.vertex;
+        }
+
+        if (a.index != b.index) {
+            return a.index < b.index;
+        }
+
+        if (a.fog != b.fog) {
+            return a.fog < b.fog;
+        }
+
+        if (a.fogColor != b.fogColor) {
+            return a.fogColor < b.fogColor;
+        }
+
+        if (a.fogStart != b.fogStart) {
+            return a.fogStart < b.fogStart;
+        }
+
+        return a.fogEnd < b.fogEnd;
+    });
+
+    for (size_t i = 0; i < count; ++i) {
+        s_terrainOrder[i] = s_sortKeys[i].order;
+    }
+
+    constexpr uint32_t kSlice = 16384;
+
+    for (size_t start = 0; start < count;) {
+        size_t end = start + 1;
+
+        while (end < count && SameTerrainGroup(s_terrainBatch[s_terrainOrder[start]], s_terrainBatch[s_terrainOrder[end]])) {
+            ++end;
+        }
+
+        s_terrainDraws.clear();
+        s_terrainQueued.clear();
+        const TerrainCapture* bound = nullptr;
+
+        for (size_t n = start; n < end; ++n) {
+            size_t index = s_terrainOrder[n];
+            const TerrainCapture& cap = s_terrainBatch[index];
+            GxTerrainDraw draw = {};
+
+            if (!FillChunkLayers(draw, cap, eye0, eye1)) {
+                DrawCapturedLayers(cap);
+                s_terrainOwnShadow[index] = 1;
+                continue;
+            }
+
+            if (!bound) {
+                bound = &cap;
+            }
+
+            s_terrainDraws.push_back(draw);
+            s_terrainQueued.push_back(index);
+        }
+
+        if (bound) {
+            CMapRenderChunkLayer* layer0 = &bound->chunk->m_layers[0];
+            CGxTex* color = TextureGetGxTex(layer0->m_texture, 0, nullptr);
+            CGxTex* alpha = layer0->m_layerTexture ? TextureGetGxTex(layer0->m_layerTexture, 1, nullptr) : color;
+            g_theGxDevicePtr->RsSet(GxRs_Texture0, color);
+            g_theGxDevicePtr->RsSet(GxRs_Texture1, alpha ? alpha : color);
+            GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);
+            GxUpdateAlphaRef(GxRs_AlphaRef);
+            ApplyChunkFog(*bound);
+            GxPrimVertexPtr(bound->chunk->m_chunkBuf->m_vertexBuf, CMapRenderChunk::s_gxBufVertexFormat);
+            g_theGxDevicePtr->PrimIndexPtr(bound->chunk->m_chunkBuf->m_indexBuf);
+
+            for (uint32_t offset = 0; offset < s_terrainDraws.size();) {
+                uint32_t n = static_cast<uint32_t>(s_terrainDraws.size() - offset);
+
+                if (n > kSlice) {
+                    n = kSlice;
+                }
+
+                if (!g_theGxDevicePtr->DrawTerrainBatch(s_terrainDraws.data() + offset, n)) {
+                    for (uint32_t i = 0; i < n; ++i) {
+                        size_t index = s_terrainQueued[offset + i];
+                        DrawCapturedLayers(s_terrainBatch[index]);
+                        s_terrainOwnShadow[index] = 1;
+                    }
+                } else {
+                    DrawShadowGroup(s_terrainDraws.data() + offset, offset, n);
+                }
+
+                offset += n;
+            }
+        }
+
+        start = end;
+    }
+}
+
+void CMapRenderChunk::QueueMultiPass(CMapRenderChunk* chunk) {
+    CGxBuf* vertex = chunk->m_chunkBuf ? chunk->m_chunkBuf->m_vertexBuf : nullptr;
+    CGxBuf* index = chunk->m_chunkBuf ? chunk->m_chunkBuf->m_indexBuf : nullptr;
+    int32_t special = (chunk->m_renderFlags & 0x4) != 0;
+
+    for (uint32_t i = 0; i < chunk->m_layersCount; ++i) {
+        if (chunk->m_layers[i].m_flags & (0x40 | 0x80)) {
+            special = 1;
+        }
+    }
+
+    if (special || !vertex || !index || !IsVertexSlab(vertex->m_pool) || !IsIndexSlab(index->m_pool) || !vertex->m_itemSize || vertex->m_index % vertex->m_itemSize || index->m_itemSize != 2) {
+        CMapRenderChunk::RenderMultiPassAlpha(chunk);
+        return;
+    }
+
+    TerrainCapture cap = {};
+    CGxMatrixStack& world = g_theGxDevicePtr->m_xforms[GxXform_World];
+    cap.chunk = chunk;
+    cap.world = world.m_mtx[world.m_level];
+    C3Vector offset = CWorldScene::s_activeWorldView - chunk->m_vec1;
+    CMapRenderChunk::ComputeTexMatrices(cap.tex0, cap.tex1, offset, -CMapChunk::s_geoToTex);
+    CaptureLights(cap);
+    cap.fogStart = g_theGxDevicePtr->m_appRenderStates[GxRs_FogStart].m_value.m_data.f[0];
+    cap.fogEnd = g_theGxDevicePtr->m_appRenderStates[GxRs_FogEnd].m_value.m_data.f[0];
+    cap.fogColor = g_theGxDevicePtr->m_appRenderStates[GxRs_FogColor].m_value.m_data.u[0];
+    cap.fog = g_theGxDevicePtr->m_appRenderStates[GxRs_Fog].m_value.m_data.i[0];
+    cap.indexCount = chunk->m_batch.m_count;
+    cap.firstIndex = index->m_index / 2 + chunk->m_batch.m_start;
+    cap.baseVertex = static_cast<int32_t>(vertex->m_index / vertex->m_itemSize);
+    s_terrainBatch.push_back(cap);
+}
+
+void CMapRenderChunk::FlushMultiPass() {
+    Profiler::Scope profile(Profiler::TerrainFlush);
+    if (s_terrainBatch.empty()) {
+        return;
+    }
+
+    uint32_t maxLayers = 0;
+
+    for (const TerrainCapture& cap : s_terrainBatch) {
+        if (cap.chunk->m_layersCount > maxLayers) {
+            maxLayers = cap.chunk->m_layersCount;
+        }
+    }
+
+    if (s_terrainDraws.capacity() < s_terrainBatch.size()) {
+        s_terrainDraws.reserve(s_terrainBatch.size());
+    }
+
+    int32_t bindless = g_theGxDevicePtr->TerrainBindless();
+    g_theGxDevicePtr->IRsSync(0);
+
+    const CGxAppRenderState* rs = g_theGxDevicePtr->m_appRenderStates.m_data;
+    int32_t fastEye = rs[GxRs_TextureShader0].m_value.m_data.i[0] == 1 && rs[GxRs_TextureShader1].m_value.m_data.i[0] == 1 && rs[GxRs_TexGen0].m_value.m_data.i[0] && rs[GxRs_TexGen1].m_value.m_data.i[0];
+    const C44Matrix* eye0 = nullptr;
+    const C44Matrix* eye1 = nullptr;
+
+    if (fastEye) {
+        CGxMatrixStack& gen0 = g_theGxDevicePtr->m_texGen[0];
+        CGxMatrixStack& gen1 = g_theGxDevicePtr->m_texGen[1];
+        eye0 = &gen0.m_mtx[gen0.m_level];
+        eye1 = &gen1.m_mtx[gen1.m_level];
+    }
+
+    // -- ʕ •ᴥ•ʔ✿ Bindless composites every layer in one command. The layer walk stays for the two-sampler path ✿ ʕ •ᴥ•ʔ
+    if (bindless) {
+        FlushTerrainComposite(eye0, eye1);
+    } else if (!TerrainPlanMatches(bindless) || s_layerPlans.size() < maxLayers) {
+        BuildTerrainPlans(maxLayers, bindless);
+    }
+
+    if (!bindless) {
+    for (uint32_t layer = 0; layer < maxLayers; ++layer) {
+        TerrainLayerPlan& plan = s_layerPlans[layer];
+
+        for (size_t group = 0; group < plan.keys.size(); ++group) {
+            const std::vector<size_t>& members = plan.members[group];
+            const TerrainCapture& groupFirst = s_terrainBatch[members[0]];
+            CMapRenderChunkLayer* key = &groupFirst.chunk->m_layers[layer];
+
+            if (s_meshTaken.size() < members.size()) {
+                s_meshTaken.resize(members.size());
+            }
+
+            std::fill(s_meshTaken.begin(), s_meshTaken.begin() + static_cast<std::ptrdiff_t>(members.size()), 0);
+
+            for (size_t start = 0; start < members.size(); ++start) {
+                if (s_meshTaken[start]) {
+                    continue;
+                }
+
+                const TerrainCapture& first = s_terrainBatch[members[start]];
+                CGxPool* vertexPool = first.chunk->m_chunkBuf->m_vertexBuf->m_pool;
+                CGxPool* indexPool = first.chunk->m_chunkBuf->m_indexBuf->m_pool;
+                s_terrainDraws.clear();
+                s_terrainQueued.clear();
+
+                for (size_t n = start; n < members.size(); ++n) {
+                    if (s_meshTaken[n]) {
+                        continue;
+                    }
+
+                    const TerrainCapture& cap = s_terrainBatch[members[n]];
+                    CGxBuf* vertexBuf = cap.chunk->m_chunkBuf->m_vertexBuf;
+                    CGxBuf* indexBuf = cap.chunk->m_chunkBuf->m_indexBuf;
+
+                    if (vertexBuf->m_pool != vertexPool || indexBuf->m_pool != indexPool) {
+                        continue;
+                    }
+
+                    s_meshTaken[n] = 1;
+                    CMapRenderChunkLayer* chunkLayer = &cap.chunk->m_layers[layer];
+                    GxTerrainDraw draw = {};
+                    FillTerrainDraw(draw, cap, eye0, eye1);
+
+                    if (bindless) {
+                        CGxTex* color = TextureGetGxTex(chunkLayer->m_texture, 0, nullptr);
+
+                        if (color) {
+                            GxTexSetWrap(color, GxTex_Wrap, GxTex_Wrap);
+                        }
+
+                        draw.texIndex0 = g_theGxDevicePtr->TerrainTextureSlot(color);
+
+                        if (chunkLayer->m_layerTexture) {
+                            CGxTex* alpha = TextureGetGxTex(chunkLayer->m_layerTexture, 1, nullptr);
+                            draw.texIndex1 = g_theGxDevicePtr->TerrainTextureSlot(alpha);
+                        } else {
+                            draw.texIndex1 = ~0u;
+                        }
+
+                        if (draw.texIndex0 == ~0u || (chunkLayer->m_layerTexture && draw.texIndex1 == ~0u)) {
+                            DrawTerrainChunk(cap);
+                            continue;
+                        }
+                    }
+
+                    s_terrainDraws.push_back(draw);
+                    s_terrainQueued.push_back(members[n]);
+                }
+
+                if (s_terrainDraws.empty()) {
+                    continue;
+                }
+
+                if (bindless) {
+                    CMapRenderChunkLayer* bound = &first.chunk->m_layers[layer];
+                    CGxTex* color = TextureGetGxTex(bound->m_texture, 0, nullptr);
+                    CGxTex* alpha = bound->m_layerTexture ? TextureGetGxTex(bound->m_layerTexture, 1, nullptr) : color;
+                    g_theGxDevicePtr->RsSet(GxRs_Texture0, color);
+                    g_theGxDevicePtr->RsSet(GxRs_Texture1, alpha ? alpha : color);
+                } else {
+                    CGxTex* gxTex = TextureGetGxTex(key->m_texture, 0, nullptr);
+                    g_theGxDevicePtr->RsSet(GxRs_Texture0, gxTex);
+
+                    if (gxTex) {
+                        GxTexSetWrap(gxTex, GxTex_Wrap, GxTex_Wrap);
+                    }
+
+                    if (key->m_layerTexture) {
+                        g_theGxDevicePtr->RsSet(GxRs_Texture1, TextureGetGxTex(key->m_layerTexture, 1, nullptr));
+                    } else {
+                        GxRsSet(GxRs_Texture1, 0);
+                    }
+                }
+
+                GxRsSet(GxRs_BlendingMode, layer == 0 ? GxBlend_Opaque : GxBlend_Alpha);
+                GxUpdateAlphaRef(GxRs_AlphaRef);
+                ApplyChunkFog(first);
+                GxPrimVertexPtr(first.chunk->m_chunkBuf->m_vertexBuf, CMapRenderChunk::s_gxBufVertexFormat);
+                g_theGxDevicePtr->PrimIndexPtr(first.chunk->m_chunkBuf->m_indexBuf);
+
+                constexpr uint32_t kSlice = 16384;
+
+                for (uint32_t offset = 0; offset < s_terrainDraws.size();) {
+                    uint32_t n = static_cast<uint32_t>(s_terrainDraws.size() - offset);
+
+                    if (n > kSlice) {
+                        n = kSlice;
+                    }
+
+                    if (!g_theGxDevicePtr->DrawTerrainBatch(s_terrainDraws.data() + offset, n)) {
+                        for (uint32_t i = 0; i < n; i++) {
+                            DrawTerrainChunk(s_terrainBatch[s_terrainQueued[offset + i]]);
+                        }
+                    }
+
+                    offset += n;
+                }
+            }
+        }
+    }
+    }
+
+    for (size_t index = 0; index < s_terrainBatch.size(); ++index) {
+        if (index < s_terrainOwnShadow.size() && s_terrainOwnShadow[index]) {
+            continue;
+        }
+
+        const TerrainCapture& cap = s_terrainBatch[index];
+
+        if (!cap.chunk->m_shadowTexture || !(CWorld::enables & Enable_Shadow)) {
+            continue;
+        }
+
+        ApplyChunkFog(cap);
+        GxXformSet(GxXform_World, cap.world);
+        GxXformSet(GxXform_Tex0, cap.tex0);
+        GxXformSet(GxXform_Tex1, cap.tex1);
+        GxPrimVertexPtr(cap.chunk->m_chunkBuf->m_vertexBuf, CMapRenderChunk::s_gxBufVertexFormat);
+        g_theGxDevicePtr->PrimIndexPtr(cap.chunk->m_chunkBuf->m_indexBuf);
+        GxRsSet(GxRs_BlendingMode, GxBlend_Alpha);
+        GxUpdateAlphaRef(GxRs_AlphaRef);
+        g_theGxDevicePtr->RsSet(GxRs_Texture0, TextureGetGxTex(CWorld::shadowModTexture, 1, nullptr));
+        g_theGxDevicePtr->RsSet(GxRs_Texture1, TextureGetGxTex(cap.chunk->m_shadowTexture, 1, nullptr));
+        g_theGxDevicePtr->Draw(&cap.chunk->m_batch, 1);
+    }
+
+    s_terrainBatch.clear();
+    s_terrainDraws.clear();
+    s_terrainOwnShadow.clear();
 }
 
 // VERIFY: 18189b69 manual
@@ -2274,7 +3405,7 @@ void CMapRenderChunk::RenderMultiPassAlpha(CMapRenderChunk* renderChunk) {
         g_theGxDevicePtr->Draw(&renderChunk->m_batch, 1);
 
         if (i == 0 && specular) {
-            GxRsSet(GxRs_TexGen0, GxTexGen_World);
+            GxRsSet(GxRs_TexGen0, GxTexGen_EyeLinear);
             GxRsSet(GxRs_TextureShader0, 1);
         }
 
@@ -2368,7 +3499,7 @@ void CMapRenderChunk::RenderMultiPassPixelShaderBigAlpha(CMapRenderChunk* render
         g_theGxDevicePtr->Draw(&renderChunk->m_batch, 1);
 
         if (i == 0 && specular) {
-            GxRsSet(GxRs_TexGen0, GxTexGen_World);
+            GxRsSet(GxRs_TexGen0, GxTexGen_EyeLinear);
             GxRsSet(GxRs_TextureShader0, 1);
         }
 
@@ -2446,7 +3577,7 @@ void CMapRenderChunk::RenderMultiPassPixelShader(CMapRenderChunk* renderChunk) {
         g_theGxDevicePtr->Draw(&renderChunk->m_batch, 1);
 
         if (i == 0 && specular) {
-            GxRsSet(GxRs_TexGen0, GxTexGen_World);
+            GxRsSet(GxRs_TexGen0, GxTexGen_EyeLinear);
             GxRsSet(GxRs_TextureShader0, 1);
         }
 

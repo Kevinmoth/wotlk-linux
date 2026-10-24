@@ -1,7 +1,10 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <csignal>
+#if !defined(__APPLE__)
 #include <malloc.h>
+#endif
 #include <new>
 #include <typeinfo>
 #include "ConsoleClient.h"
@@ -114,24 +117,11 @@ static const char* s_completedCmd;
 // STATIC: 0x00CA198C
 HTEXTFONT s_textFont;
 
-enum CONSOLERESIZESTATE : int32_t {
-    CS_NONE = 0,
-    CS_STRETCH = 1,
-    NUM_CONSOLERESIZESTATES = 2,
-};
-
 // STATIC: 0x00CA1990
-static CONSOLERESIZESTATE s_consoleResizeState;
-
-enum HIGHLIGHTSTATE : int32_t {
-    HS_NONE = 0,
-    HS_HIGHLIGHTING = 1,
-    HS_ENDHIGHLIGHT = 2,
-    NUM_HIGHLIGHTSTATES = 3,
-};
+static int32_t s_consoleResizeState;
 
 // STATIC: 0x00CA1994
-static HIGHLIGHTSTATE s_highlightState;
+static int32_t s_highlightState;
 
 // STATIC: 0x00CA1998
 static float s_highlightHStart;
@@ -209,7 +199,7 @@ static void ReserveInputSpace(CONSOLELINE* line, uint32_t chars) {
 // VERIFY: 8e2941b8 auto
 // OFFSET: 0x00763830
 static void ResetHighlight() {
-    s_highlightState = HS_NONE;
+    s_highlightState = 0;
     s_hRect.right = 0.0f;
     s_hRect.left = 0.0f;
     s_hRect.top = 0.0f;
@@ -250,8 +240,8 @@ static void UpdateHighlight() {
 // OFFSET: 0x007639A0
 static int32_t OnMouseUp(const void* data, void* param) {
     if (!EventIsKeyDown(s_consoleHotKey) && s_active) {
-        s_highlightState = HS_ENDHIGHLIGHT;
-        s_consoleResizeState = CS_NONE;
+        s_highlightState = 2;
+        s_consoleResizeState = 0;
     }
 
     return 1;
@@ -266,7 +256,7 @@ static int32_t OnMouseMove(const void* data, void* param) {
         return 1;
     }
 
-    if (s_consoleResizeState == CS_STRETCH) {
+    if (s_consoleResizeState == 1) {
         s_consoleHeight = 1.0f - mouse->m_y;
 
         if (s_consoleHeight < s_fontHeight) {
@@ -278,7 +268,7 @@ static int32_t OnMouseMove(const void* data, void* param) {
 
     s_highlightHEnd = mouse->m_x;
 
-    if (s_highlightState == HS_HIGHLIGHTING) {
+    if (s_highlightState == 1) {
         UpdateHighlight();
     }
 
@@ -525,7 +515,7 @@ static void EnforceMaxLines() {
     }
 
     node->~CONSOLELINE();
-    SMemFree(node, typeid(CONSOLELINE).raw_name(), SLOG_OBJECT, 0);
+    SMemFree(node, RAW_TYPE_NAME(CONSOLELINE), SLOG_OBJECT, 0);
     s_NumLines--;
 }
 
@@ -717,7 +707,7 @@ static int32_t OnMouseDown(const void* data, void* param) {
 
     if (y >= height - s_fontHeight * 0.75f && s_consoleHeight >= y) {
         ResetHighlight();
-        s_consoleResizeState = CS_STRETCH;
+        s_consoleResizeState = 1;
 
         return 0;
     }
@@ -733,7 +723,7 @@ static int32_t OnMouseDown(const void* data, void* param) {
     }
 
     SStrCopy(s_copyText, reinterpret_cast<const char*>(line->m_buffer), sizeof(s_copyText));
-    s_highlightState = HS_HIGHLIGHTING;
+    s_highlightState = 1;
 
     int32_t lineIndex = static_cast<int32_t>((s_consoleHeight - y) / s_fontHeight - 1.0f);
     s_hRect.top = 1.0f - (s_consoleHeight - s_fontHeight * 0.75f - s_fontHeight - lineIndex * s_fontHeight);
@@ -870,8 +860,39 @@ static int32_t OnKeyDownRepeat(const void* data, void* param) {
 
 // VERIFY: ed71f29f manual
 // OFFSET: 0x00765270
+static int32_t s_consoleLogTee = 0;
+void ConsoleSetLogTee(int32_t enabled) {
+    s_consoleLogTee = enabled;
+#if !defined(_WIN32)
+    // ʕ ●ᴥ●ʔ✿ A dead pipe reader must not kill the client via SIGPIPE ✿ ʕ ●ᴥ●ʔ
+    if (enabled) signal(SIGPIPE, SIG_IGN);
+#endif
+}
+int32_t ConsoleLogTeeEnabled() { return s_consoleLogTee; }
+
 void ConsoleWrite(const char* str, COLOR_T color) {
-    if (!str || !*str || !ConsoleDeviceExists() || !s_textFont) {
+    if (!str || !*str) {
+        return;
+    }
+
+    if (s_consoleLogTee) {
+        // ʕ ◕ᴥ◕ ʔ✿ One locked write per line so worker threads cannot interleave ✿ ʕ ◕ᴥ◕ ʔ
+#if defined(_WIN32)
+        _lock_file(stdout);
+#else
+        flockfile(stdout);
+#endif
+        fputs(str, stdout);
+        if (!*str || str[SStrLen(str) - 1] != '\n') fputc('\n', stdout);
+        fflush(stdout);
+#if defined(_WIN32)
+        _unlock_file(stdout);
+#else
+        funlockfile(stdout);
+#endif
+    }
+
+    if (!ConsoleDeviceExists() || !s_textFont) {
         return;
     }
 
@@ -903,7 +924,7 @@ void ConsoleWrite(const char* str, COLOR_T color) {
 // VERIFY: 7dcf8eb5 auto
 // OFFSET: 0x00765360
 void ConsoleWriteA(const char* format, COLOR_T color, ...) {
-    if (!format || !*format || !ConsoleDeviceExists()) {
+    if (!format || !*format || (!ConsoleDeviceExists() && !s_consoleLogTee)) {
         return;
     }
 
@@ -918,7 +939,7 @@ void ConsoleWriteA(const char* format, COLOR_T color, ...) {
 // VERIFY: da6ae03f auto
 // OFFSET: 0x007653B0
 void ConsolePrintf(const char* format, ...) {
-    if (!format || !*format || !ConsoleDeviceExists()) {
+    if (!format || !*format || (!ConsoleDeviceExists() && !s_consoleLogTee)) {
         return;
     }
 
@@ -933,7 +954,7 @@ void ConsolePrintf(const char* format, ...) {
 // VERIFY: d43d21f6 manual
 // OFFSET: 0x007658A0
 void ConsoleCommandExecute(const char* commandLine, int32_t addToHistory) {
-    if (s_execState == EM_RECORDING || s_execState == EM_PROMPTOVERWRITE || s_execState == EM_APPEND) {
+    if (s_execState == 1 || s_execState == 0 || s_execState == 2) {
         if (!AddLineToExecFile(commandLine)) {
             return;
         }

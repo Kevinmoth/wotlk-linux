@@ -19,7 +19,11 @@ ComSat::Sound::IO::~IO() {
 // VERIFY: f1d0cb09 manual
 // OFFSET: 0x00887B10
 ComSat::Sound::IO* ComSat::Sound::IO::Create(const ComSat::Initialization& init, ComSat::Sound::IOCallback& callback, ComSat::Allocator& allocator) {
-    return new (allocator.Alloc(sizeof(ComSat::Sound::IOSoundEngine))) ComSat::Sound::IOSoundEngine(init, callback, allocator);
+    void* memory = allocator.Alloc(sizeof(ComSat::Sound::IOSoundEngine));
+    if (!memory) {
+        return nullptr;
+    }
+    return new (memory) ComSat::Sound::IOSoundEngine(init, callback, allocator);
 }
 
 // INLINED
@@ -164,12 +168,20 @@ void ComSat::Sound::IOSoundEngine::ShutDownCapture() {
 // VERIFY: 157b0a60 auto
 // OFFSET: 0x008877E0
 void ComSat::Sound::IOSoundEngine::SetPlayerPlaybackVolume(uint8_t player, int32_t channel, float volume) {
-    SI2::SetVolume(&this->m_channels[channel]->m_object, volume);
+    ComSat::Sound::OutputChannel* output = this->m_channels[channel];
+    if (!output) {
+        return;
+    }
+    SI2::SetVolume(&output->m_object, volume);
 }
 
 // VERIFY: 4c066a98 manual
 // OFFSET: 0x00887860
 bool ComSat::Sound::IOSoundEngine::PlayDataForPlayer(uint8_t player, int32_t channel, uint8_t* data, uint32_t size, double rate) {
+    ComSat::Sound::OutputChannel* output = this->m_channels[channel];
+    if (!output) {
+        return false;
+    }
     double pitch = 0.9;
     if (rate >= 0.9) {
         pitch = rate;
@@ -177,21 +189,25 @@ bool ComSat::Sound::IOSoundEngine::PlayDataForPlayer(uint8_t player, int32_t cha
             pitch = 1.1;
         }
     }
-    SI2::SetPitch(&this->m_channels[channel]->m_object, static_cast<float>(pitch * this->m_sampleRate));
+    SI2::SetPitch(&output->m_object, static_cast<float>(pitch * this->m_sampleRate));
     uint32_t count = size >> 1;
     float* samples = static_cast<float*>(alloca(sizeof(float) * count));
     const int16_t* pcm = reinterpret_cast<const int16_t*>(data);
     for (uint32_t i = 0; i < count; i++) {
         samples[i] = pcm[i] * (1.0f / 32768.0f);
     }
-    this->m_channels[channel]->m_buffer.Write(samples, count);
+    output->m_buffer.Write(samples, count);
     return true;
 }
 
 // VERIFY: ffd08db7 manual
 // OFFSET: 0x00887980
 int32_t ComSat::Sound::IOSoundEngine::GetRemainingPlaybackBytes(uint8_t player, int32_t channel) {
-    return 2 * this->m_channels[channel]->m_buffer.Count();
+    ComSat::Sound::OutputChannel* output = this->m_channels[channel];
+    if (!output) {
+        return 0;
+    }
+    return 2 * output->m_buffer.Count();
 }
 
 // VERIFY: 11476088 auto
@@ -221,15 +237,23 @@ void ComSat::Sound::IOSoundEngine::InitCapture() {
     }
     if (SI2::VoiceChat_IsVoiceChatInitialized()) {
         for (uint32_t i = 0; i < this->m_channels.Count(); i++) {
-            this->m_channels[i] = new (this->m_allocator->Alloc(sizeof(ComSat::Sound::OutputChannel))) ComSat::Sound::OutputChannel(*this->m_allocator);
+            void* memory = this->m_allocator->Alloc(sizeof(ComSat::Sound::OutputChannel));
+            if (!memory) {
+                this->m_channels[i] = nullptr;
+                continue;
+            }
+            this->m_channels[i] = new (memory) ComSat::Sound::OutputChannel(*this->m_allocator);
             ComSat::Sound::OutputChannel* channel = this->m_channels[i];
             SI2::VoiceChat_CreateChatSound(&channel->m_object, channel, 1);
-            SI2SoundUserData* userData = new (SMemAlloc(sizeof(SI2SoundUserData), __FILE__, __LINE__, 0)) SI2SoundUserData();
-            userData->m_name = "<Voice Chat>";
-            userData->m_soundKitId = 0;
-            userData->m_def = nullptr;
-            userData->m_group = 3;
-            channel->m_object.m_sound.SetUserData(userData);
+            void* userMemory = SMemAlloc(sizeof(SI2SoundUserData), __FILE__, __LINE__, 0);
+            if (userMemory) {
+                SI2SoundUserData* userData = new (userMemory) SI2SoundUserData();
+                userData->m_name = "<Voice Chat>";
+                userData->m_soundKitId = 0;
+                userData->m_def = nullptr;
+                userData->m_group = 3;
+                channel->m_object.m_sound.SetUserData(userData);
+            }
             SI2::SetPitch(&channel->m_object, this->m_sampleRate);
             SI2::VoiceChat_Play(&channel->m_object);
         }

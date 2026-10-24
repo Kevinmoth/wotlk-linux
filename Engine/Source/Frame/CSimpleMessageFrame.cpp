@@ -1,4 +1,3 @@
-#include "Engine/Source/Frame/MessageFrameConstants.h"
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -122,7 +121,7 @@ CSimpleMessageFrameLineNode::CSimpleMessageFrameLineNode() {
     this->m_fadeLeft = 0.0f;
     this->m_isVisible = false;
 
-    void* data = CSimpleFontString::s_allocator.GetData(0, typeid(CSimpleFontString).raw_name(), SLOG_OBJECT);
+    void* data = CSimpleFontString::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleFontString), SLOG_OBJECT);
     this->m_string = data ? new (data) CSimpleFontString(nullptr, 2, true) : nullptr;
 
     CSimpleFontString* string = this->m_string;
@@ -216,10 +215,10 @@ CSimpleMessageFrame::CSimpleMessageFrame(CSimpleFrame* parent) : CSimpleFrame(pa
     this->m_numVisible = 0;
     this->m_textMaxSize = 0;
     this->m_font = new (SMemAlloc(sizeof(CSimpleFontedFrameFont), __FILE__, __LINE__, 0)) CSimpleFontedFrameFont(this);
-    this->m_timeVisible = DEFAULT_TIME_VISIBLE;
+    this->m_timeVisible = 10.0f;
     this->m_fading = 1;
     this->m_insertMode = INSERT_AT_BOTTOM;
-    this->m_fadeDuration = DEFAULT_FADE_DURATION;
+    this->m_fadeDuration = 3.0f;
 }
 
 // VERIFY: 6c8073c0 auto

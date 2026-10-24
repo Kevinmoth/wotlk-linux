@@ -718,7 +718,7 @@ static int32_t Script_CalculateAuctionDeposit(lua_State* L) {
     CGItem_C* item;
     ItemStats_C* stats;
 
-    if (!rec || !(sellItem = CGAuctionHouse::m_sellItem) || !(item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(CGAuctionHouse::m_sellItem, TYPE_ITEM, __FILE__, __LINE__))) || !(stats = g_itemDBCache.GetRecord(item->m_obj->m_entryID, sellItem, AuctionSellItemQueryCallback, nullptr, false))) {
+    if (!rec || !(sellItem = CGAuctionHouse::m_sellItem) || !(item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(CGAuctionHouse::m_sellItem, TYPEMASK_ITEM, __FILE__, __LINE__))) || !(stats = g_itemDBCache.GetRecord(item->m_obj->m_entryID, sellItem, AuctionSellItemQueryCallback, nullptr, false))) {
         lua_pushnumber(L, 0.0);
         return 1;
     }
@@ -745,7 +745,7 @@ static int32_t Script_ClickAuctionSellItemButton(lua_State* L) {
     uint32_t slot;
     CGGameUI::GetCursorItem(item, container, slot);
 
-    CGItem_C* object = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPE_ITEM, __FILE__, __LINE__));
+    CGItem_C* object = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPEMASK_ITEM, __FILE__, __LINE__));
 
     if (object && !CGAuctionHouse::IsSellItemValid(object, 1)) {
         return 0;
@@ -850,7 +850,7 @@ static int32_t Script_GetAuctionItemInfo(lua_State* L) {
     CGItem_C::BuildItemName(name, sizeof(name), auction->m_itemID, auction->m_randomPropertyID);
     lua_pushstring(L, name);
 
-    const char* path = ClientDBStringLookup(SLOOKUP_INVENTORYICONPATH);
+    const char* path = ClientDBStringLookup(3);
     char texture[260];
     SStrPrintf(texture, sizeof(texture), "%s%s%s", path, *path ? "\\" : "", CGItem_C::GetInventoryArt(stats->m_displayId));
     lua_pushstring(L, texture);
@@ -908,84 +908,20 @@ static int32_t Script_PlaceAuctionBid(lua_State* L) {
         return 0;
     }
 
-    if (!CGGameUI::CanPerformAction(8)) {
-        return 0;
-    }
-
     const char* type = lua_tolstring(L, 1, nullptr);
-    uint32_t index = static_cast<uint32_t>(lua_tonumber(L, 2)) - 1;
-    AuctionItemInfo* auction = nullptr;
-    uint32_t bid = static_cast<uint32_t>(lua_tonumber(L, 3));
+    int32_t kind = -1;
 
-    if (!SStrCmpI(type, "owner", STORM_MAX_STR)) {
-        auction = GetOwnerAuction(index);
+    if (!SStrCmpI(type, "list", STORM_MAX_STR)) {
+        kind = 0;
+    } else if (!SStrCmpI(type, "owner", STORM_MAX_STR)) {
+        kind = 1;
     } else if (!SStrCmpI(type, "bidder", STORM_MAX_STR)) {
-        auction = GetBidderAuction(index);
-    } else if (!SStrCmpI(type, "list", STORM_MAX_STR)) {
-        auction = GetListAuction(index);
-    }
-
-    CGPlayer_C* player = ClntObjMgrGetActivePlayerObj();
-
-    if (!auction || !player) {
+        kind = 2;
+    } else {
         return 0;
     }
 
-    WOWGUID auctioneer = CGAuctionHouse::m_auctioneer;
-
-    if (!auctioneer) {
-        return 0;
-    }
-
-    if (auction->m_buyout && bid > auction->m_buyout) {
-        bid = auction->m_buyout;
-    }
-
-    if (bid < auction->m_minBid) {
-        CGGameUI::DisplayError(ERR_AUCTION_MIN_BID);
-        return 0;
-    }
-
-    if (bid <= auction->m_bid) {
-        CGGameUI::DisplayError(ERR_AUCTION_HIGHER_BID);
-        return 0;
-    }
-
-    if (auction->m_bid && bid < auction->m_bid + auction->m_minIncrement && (!auction->m_buyout || bid < auction->m_buyout)) {
-        CGGameUI::DisplayError(ERR_AUCTION_BID_INCREMENT);
-        return 0;
-    }
-
-    if (bid > 2000000000 && bid > auction->m_bid + auction->m_minIncrement) {
-        return 0;
-    }
-
-    uint32_t cost = bid;
-
-    if (auction->m_bidder == player->m_obj->m_guid) {
-        cost = bid - auction->m_bid;
-    }
-
-    if (player->GetCoinage() < cost) {
-        CGGameUI::DisplayError(ERR_NOT_ENOUGH_MONEY);
-        return 0;
-    }
-
-    WOWGUID none = WOWGUID();
-    ItemStats_C* stats = g_itemDBCache.GetRecord(auction->m_itemID, none, nullptr, nullptr, false);
-
-    if (stats && !player->GetBag()->ItemCountValid(auction->m_itemID, stats, auction->m_count, true)) {
-        return 0;
-    }
-
-    CDataStore msg;
-    msg.Put(static_cast<uint32_t>(CMSG_AUCTION_PLACE_BID));
-    msg.Put(auctioneer.m_guid);
-    msg.Put(auction->m_auctionID);
-    msg.Put(bid);
-    msg.Finalize();
-    ClientServices::Send2(&msg);
-    CGAuctionHouse::m_lastBidAmount = bid;
+    CGAuctionHouse::PlaceBidNative(kind, static_cast<uint32_t>(lua_tonumber(L, 2)) - 1, static_cast<uint32_t>(lua_tonumber(L, 3)));
     return 0;
 }
 
@@ -1030,7 +966,7 @@ static int32_t Script_GetAuctionSellItemInfo(lua_State* L) {
     CGItem_C* item;
     ItemStats_C* stats;
 
-    if (!sellItem || !(item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(CGAuctionHouse::m_sellItem, TYPE_ITEM, __FILE__, __LINE__))) || !(stats = g_itemDBCache.GetRecord(item->m_obj->m_entryID, sellItem, AuctionSellItemQueryCallback, nullptr, false))) {
+    if (!sellItem || !(item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(CGAuctionHouse::m_sellItem, TYPEMASK_ITEM, __FILE__, __LINE__))) || !(stats = g_itemDBCache.GetRecord(item->m_obj->m_entryID, sellItem, AuctionSellItemQueryCallback, nullptr, false))) {
         lua_pushnil(L);
         lua_pushnil(L);
         lua_pushnumber(L, 1.0);
@@ -1047,7 +983,7 @@ static int32_t Script_GetAuctionSellItemInfo(lua_State* L) {
     item->GetFullItemName(name, sizeof(name));
     lua_pushstring(L, name);
 
-    const char* path = ClientDBStringLookup(SLOOKUP_INVENTORYICONPATH);
+    const char* path = ClientDBStringLookup(3);
     char texture[260];
     SStrPrintf(texture, sizeof(texture), "%s%s%s", path, *path ? "\\" : "", CGItem_C::GetInventoryArt(stats->m_displayId));
     lua_pushstring(L, texture);
@@ -1086,7 +1022,7 @@ static int32_t Script_StartAuction(lua_State* L) {
         return 0;
     }
 
-    CGItem_C* item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(CGAuctionHouse::m_sellItem, TYPE_ITEM, __FILE__, __LINE__));
+    CGItem_C* item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(CGAuctionHouse::m_sellItem, TYPEMASK_ITEM, __FILE__, __LINE__));
 
     if (!item) {
         return 0;

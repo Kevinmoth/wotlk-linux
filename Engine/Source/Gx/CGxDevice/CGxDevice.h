@@ -68,6 +68,26 @@ struct CGxAppRenderState {
 
 typedef void (__fastcall* GxDeviceCallback)();
 
+// ʕ •ᴥ•ʔ✿ One terrain chunk inside a multi-draw. The matrices match the GPU record in Ffp.vert ✿ ʕ •ᴥ•ʔ
+struct GxTerrainDraw {
+    C44Matrix world;
+    C44Matrix tex0;
+    C44Matrix tex1;
+    float lightPos[4][4];
+    float lightDiffuse[4][4];
+    float lightAmbient[4][4];
+    float lightAtten[4][4];
+    uint32_t indexCount;
+    uint32_t firstIndex;
+    int32_t baseVertex;
+    uint32_t texIndex0;
+    uint32_t texIndex1;
+    // -- ʕ •ᴥ•ʔ✿ 0 is the single pair above. A positive count is every layer of one chunk, packed into the spare light .w slots ✿ ʕ •ᴥ•ʔ
+    uint32_t layerCount;
+    uint32_t layerTex[4];
+    uint32_t layerAlpha[4];
+};
+
 class CGxDevice {
     public:
     struct TextureTarget {
@@ -115,7 +135,7 @@ class CGxDevice {
     /* 0F70 */ CBoundingBox m_viewport;
     /* 0F88 */ C44Matrix m_projection;
     /* 0FC8 */ C44Matrix m_projNative;
-    /* 1008 */ CGxMatrixStack m_xforms [GxXforms_Last];
+    /* 1008 */ CGxMatrixStack m_xforms [11];
     /* 1C10 */ CGxMatrixStack m_texGen [8];
     /* 24D0 */ uint32_t m_clipPlaneMask;
     /* 24D4 */ C4Plane m_clipPlane [6];
@@ -201,6 +221,18 @@ class CGxDevice {
     virtual void XformSetProjection(const C44Matrix& matrix);
     virtual void XformSetView(const C44Matrix& matrix);
     virtual void Draw(CGxBatch* batch, int32_t count);
+    virtual int32_t GpuSkinBind(const C44Matrix* bones, uint32_t boneCount);
+    virtual int32_t GpuSkinBindInstances(const C44Matrix* const* bones, uint32_t instances, uint32_t boneCount) { (void)bones; (void)instances; (void)boneCount; return 0; }
+    virtual int32_t GpuSkinSupported() const;
+    virtual void DrawInstanced(CGxBatch* batch, const C44Matrix* worlds, uint32_t count);
+    virtual void GpuSkinMesh(int32_t bindPose) { (void)bindPose; }
+    virtual int32_t GpuSkinMesh() const { return 0; }
+    virtual void GpuSkinInfluences(uint32_t count) { (void)count; }
+    virtual int32_t DrawTerrainBatch(const GxTerrainDraw* draws, uint32_t count, int32_t mode = 2);
+    virtual int32_t TerrainBindless() { return 0; }
+    virtual uint32_t TerrainTextureSlot(CGxTex*) { return ~0u; }
+    virtual uint64_t ResidentHeapBytes() const { return 0; }
+    virtual void ResolveTexMatrix(uint32_t tmu, C44Matrix& matrix);
     virtual void PrimBegin(EGxPrim primType);
     virtual void PrimDrawElements();
     virtual void PrimVertex(const C3Vector& v);
@@ -267,13 +299,17 @@ class CGxDevice {
     static int32_t DeviceAdapterInfer(uint16_t& deviceID);
     static int32_t FormatExists(TSGrowableArray<CGxFormat>& formats, const CGxFormat& format);
     static int32_t OpenGlAdapterFormats(TSGrowableArray<CGxFormat>& formats);
+#if defined(WOWDECOMP_VULKAN)
+    static int32_t VulkanAdapterFormats(TSGrowableArray<CGxFormat>& formats);
+#endif
     static void ClampRectBottom(CiRect& windowRect);
     static void ClampRectBottomByAspect(CiRect& windowRect);
     static void ClampRectLeftByAspect(CiRect& windowRect);
     static void ClampRectRightByAspect(CiRect& windowRect);
     static void ClampRectTopByAspect(CiRect& windowRect);
     static void Log(const char* format, ...);
-    static void Log(const char* format, va_list args);
+    // ʕ •ᴥ•ʔ✿ Not an overload. Win64 va_list is char*, so Log(fmt, va_list) would steal every %s call ✿ ʕ •ᴥ•ʔ
+    static void LogV(const char* format, va_list args);
     static void LogClose();
     static void LogOpen();
     static void ClampRectLeft(CiRect& windowRect);

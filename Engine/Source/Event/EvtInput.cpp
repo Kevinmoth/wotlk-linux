@@ -211,8 +211,12 @@ void ConvertPosition(int32_t x, int32_t y, float* outX, float* outY) {
         }
     }
 
-    tagRECT windowRect;
-    OsGetDefaultWindowRect(&windowRect);
+    tagRECT windowRect = {};
+    if (!OsGetDefaultWindowRect(&windowRect) || windowRect.right <= windowRect.left || windowRect.bottom <= windowRect.top) {
+        *outX = 0.0f;
+        *outY = 0.0f;
+        return;
+    }
 
     *outX = static_cast<float>(x) / static_cast<float>(windowRect.right - windowRect.left);
     *outY = 1.0f - static_cast<float>(y) / static_cast<float>(windowRect.bottom - windowRect.top);
@@ -432,15 +436,15 @@ void IEvtDispatchInput(EvtContext* context, OSINPUT id, int32_t* param, int32_t*
             IEvtDispatchMouseEvent(context, static_cast<MOUSEBUTTON>(param[0]), param[1], param[2], 0, param[3]);
             break;
 
-        case OS_INPUT_JOYSTICK_STICK:
+        case OS_INPUT_14:
             IEvtDispatchJoystickStick(context, param[0], param[1], param[2], param[3]);
             break;
 
-        case OS_INPUT_JOYSTICK_AXIS:
+        case OS_INPUT_15:
             IEvtDispatchJoystickAxis(context, param[0], param[1], param[3]);
             break;
 
-        case OS_INPUT_JOYSTICK_BUTTON_DOWN: {
+        case OS_INPUT_16: {
             EVENT_DATA_JOYSTICK data;
             data.unused_0000 = 0;
             data.m_id = param[0];
@@ -451,7 +455,7 @@ void IEvtDispatchInput(EvtContext* context, OSINPUT id, int32_t* param, int32_t*
             break;
         }
 
-        case OS_INPUT_JOYSTICK_BUTTON_UP: {
+        case OS_INPUT_17: {
             EVENT_DATA_JOYSTICK data;
             data.unused_0000 = 0;
             data.m_id = param[0];
@@ -462,7 +466,7 @@ void IEvtDispatchInput(EvtContext* context, OSINPUT id, int32_t* param, int32_t*
             break;
         }
 
-        case OS_INPUT_JOYSTICK_HAT: {
+        case OS_INPUT_18: {
             EVENT_DATA_JOYSTICK data;
             data.unused_0000 = 0;
             data.m_id = param[0];

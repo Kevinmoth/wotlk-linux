@@ -7,7 +7,6 @@
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/Storm/H/stpl.h"
 #include "Engine/Source/Storm/Source/SThread.h"
-#include "WoW/Source/DB/Types.h"
 #include "WoW/Source/DB/WowClientDB.h"
 #include "WoW/Source/DB/Rec/Startup_StringsRec.h"
 #include "Engine/Source/Tempest/C3Vector.h"
@@ -37,6 +36,7 @@ enum WOWCMDOPT {
     CMD_CONSOLE = 35,
     CMD_HW_DETECT = 36,
     CMD_GX_OVERRIDE = 39,
+    CMD_CONSOLE_LOG = 40,
 };
 
 struct ARCHIVEINFO {
@@ -51,7 +51,7 @@ extern CVar* g_accountNameVar;
 extern CVar* g_accountUsesTokenVar;
 extern CVar* g_checkAddonVersionVar;
 extern HEVENTCONTEXT g_clientEventContext;
-extern bool g_hasIsoLocale[NUM_DB_LOCALES];
+extern bool g_hasIsoLocale[12];
 extern CVar* g_lastCharacterIndexVar;
 extern CVar* g_readContestVar;
 extern CVar* g_readEULAVar;
@@ -94,7 +94,9 @@ uint32_t GetM2CvarFlags();
 int32_t InitializeEngineCallback(const void* data, void* param);
 bool InitializeGlobal();
 bool LocaleCallback(CVar* var, const char* oldValue, const char* value, void* arg);
+#if defined(_WIN32)
 int main();
+#endif
 int32_t Packet_SMSG_NOTIFICATION(void* param, NETMESSAGE msgId, uint32_t time, CDataStore* msg);
 int32_t Packet_SMSG_PLAYED_TIME(void* param, NETMESSAGE msgId, uint32_t time, CDataStore* msg);
 int32_t Packet_SMSG_TRANSFER_ABORTED(void* param, NETMESSAGE msgId, uint32_t time, CDataStore* msg);

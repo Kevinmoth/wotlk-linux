@@ -609,7 +609,7 @@ void CGWorldMap::SetMap(uint32_t continent, uint32_t zone, int32_t dungeonMap) {
         CGWorldMap::m_currentDungeonMap = dungeonMap;
     }
 
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
     CGWorldMap::m_numLandmarks = 0;
 
     for (int32_t i = 0; i < g_areaPOIDB.m_numRecords; i++) {
@@ -710,7 +710,7 @@ void CGWorldMap::SetMap(uint32_t continent, uint32_t zone, int32_t dungeonMap) {
 // VERIFY: 6566cbff manual
 // OFFSET: 0x00547170
 void CGWorldMap::SetMapToCurrentZone(int32_t debug) {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         CGWorldMap::SetMap(-1, -1, -1);
@@ -901,7 +901,7 @@ void CGWorldMap::CreateMiniArrowFrame(CSimpleFrame* parent) {
     }
 
     if (!CGWorldMap::m_playerMiniArrowFrame) {
-        void* data = CSimpleModel::s_allocator.GetData(0, typeid(CSimpleModel).raw_name(), SLOG_OBJECT);
+        void* data = CSimpleModel::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleModel), SLOG_OBJECT);
         CGWorldMap::m_playerMiniArrowFrame = data ? new (data) CSimpleModel(parent) : nullptr;
         CGWorldMap::m_playerMiniArrowFrame->SetModel("Interface\\Minimap\\MinimapArrow.mdx");
         CGWorldMap::m_playerMiniArrowFrame->m_modelScale = NDCToDDCHeight(1.0f) * 1.1111112f;
@@ -913,7 +913,7 @@ void CGWorldMap::CreateMiniArrowFrame(CSimpleFrame* parent) {
     }
 
     if (!CGWorldMap::m_playerMiniArrowEffectFrame) {
-        void* data = CSimpleModel::s_allocator.GetData(0, typeid(CSimpleModel).raw_name(), SLOG_OBJECT);
+        void* data = CSimpleModel::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleModel), SLOG_OBJECT);
         CGWorldMap::m_playerMiniArrowEffectFrame = data ? new (data) CSimpleModel(parent) : nullptr;
         CGWorldMap::m_playerMiniArrowEffectFrame->SetModel("Interface\\Minimap\\MinimapArrow.mdx");
         CGWorldMap::m_playerMiniArrowEffectFrame->m_modelScale = NDCToDDCHeight(1.0f) * 1.1111112f;
@@ -944,7 +944,7 @@ void CGWorldMap::UpdateArrowFrames() {
         CenterArrowModel(CGWorldMap::m_playerMiniArrowEffectFrame);
     }
 
-    CGObject_C* target = ClntObjMgrObjectPtr(CGWorldFrame::GetActiveCamera()->m_targetGUID, TYPE_OBJECT, __FILE__, __LINE__);
+    CGObject_C* target = ClntObjMgrObjectPtr(CGWorldFrame::GetActiveCamera()->m_targetGUID, TYPEMASK_OBJECT, __FILE__, __LINE__);
 
     if (!target) {
         return;
@@ -1093,7 +1093,7 @@ bool CGWorldMap::GetPlayerPosition(WOWGUID guid, float* x, float* y) {
     *y = 0.0f;
     bool outland = false;
     bool result;
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(guid, TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (player) {
         C3Vector position = player->GetPosition();
@@ -1227,7 +1227,7 @@ void CGWorldMap::CreateArrowFrame(CSimpleFrame* parent) {
     }
 
     if (!CGWorldMap::m_playerArrowFrame) {
-        void* data = CSimpleModel::s_allocator.GetData(0, typeid(CSimpleModel).raw_name(), SLOG_OBJECT);
+        void* data = CSimpleModel::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleModel), SLOG_OBJECT);
         CGWorldMap::m_playerArrowFrame = data ? new (data) CSimpleModel(parent) : nullptr;
         CGWorldMap::m_playerArrowFrame->SetModel("Interface\\Minimap\\MinimapArrow.mdx");
         CGWorldMap::m_playerArrowFrame->m_modelScale = NDCToDDCHeight(1.0f) * 1.6666666f;
@@ -1239,7 +1239,7 @@ void CGWorldMap::CreateArrowFrame(CSimpleFrame* parent) {
     }
 
     if (!CGWorldMap::m_playerArrowEffectFrame) {
-        void* data = CSimpleModel::s_allocator.GetData(0, typeid(CSimpleModel).raw_name(), SLOG_OBJECT);
+        void* data = CSimpleModel::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleModel), SLOG_OBJECT);
         CGWorldMap::m_playerArrowEffectFrame = data ? new (data) CSimpleModel(parent) : nullptr;
         CGWorldMap::m_playerArrowEffectFrame->SetModel("Interface\\Minimap\\MinimapArrow.mdx");
         CGWorldMap::m_playerArrowEffectFrame->m_modelScale = NDCToDDCHeight(1.0f) * 1.6666666f;

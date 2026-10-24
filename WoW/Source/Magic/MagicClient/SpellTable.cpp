@@ -132,7 +132,7 @@ int32_t CGSkillInfo::GetSkillCostField(const SkillRaceClassInfoRec* info, int32_
 // VERIFY: 6585c0df manual
 // OFFSET: 0x00811F20
 static bool SpellTableAddSkillLineRec(int32_t race, int32_t classId, const SkillLineAbilityRec* ability) {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (player && race != player->m_unit->m_unitFieldBytes0[0] && classId != player->m_unit->m_unitFieldBytes0[1]) {
         return false;
@@ -261,7 +261,7 @@ SkillLineAbilityRec* SpellTableLookupAbility(int32_t race, int32_t classId, int3
         return const_cast<SkillLineAbilityRec*>(rec->m_ability);
     }
 
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         return nullptr;
@@ -305,6 +305,6 @@ void SpellTableDestroy() {
     s_skillLineLinkInfoDirty = true;
     s_raceClassInfo.Clear();
     s_skillCostsInfo.Clear();
-    s_skillLineRecAllocator.Clear(typeid(SKILLLINEREC).raw_name(), SLOG_OBJECT, 1);
+    s_skillLineRecAllocator.Clear(RAW_TYPE_NAME(SKILLLINEREC), SLOG_OBJECT, 1);
     s_skillLineLinkInfo.m_count = 0;
 }

@@ -1007,10 +1007,16 @@ int32_t CGUIBindings::ExecKey(uint32_t modifiers, const char* key, int32_t isDow
     CGUIBindings::StripModifiers(this->m_heldModifiers, reducedKey);
 
     CSimpleTop* top = CSimpleTop::s_instance;
+    if (!top) {
+        return 0;
+    }
     top->unused_1250 = 1;
 
     int32_t result = 0;
     const char* command = this->GetBindingCommand(binding, mode);
+    if (!command) {
+        return 0;
+    }
 
     if (!SStrCmpI(command, "SPELL ", 6)) {
         if (!isDown) {
@@ -1663,37 +1669,37 @@ int32_t MouseButtonToIndex(uint32_t button) {
             return 14;
         case 0x4000:
             return 15;
-        case MOUSE_BUTTON_XBUTTON13:
+        case 0x8000:
             return 16;
-        case MOUSE_BUTTON_XBUTTON14:
+        case 0x10000:
             return 17;
-        case MOUSE_BUTTON_XBUTTON15:
+        case 0x20000:
             return 18;
-        case MOUSE_BUTTON_XBUTTON16:
+        case 0x40000:
             return 19;
-        case MOUSE_BUTTON_XBUTTON17:
+        case 0x80000:
             return 20;
-        case MOUSE_BUTTON_XBUTTON18:
+        case 0x100000:
             return 21;
-        case MOUSE_BUTTON_XBUTTON19:
+        case 0x200000:
             return 22;
-        case MOUSE_BUTTON_XBUTTON20:
+        case 0x400000:
             return 23;
-        case MOUSE_BUTTON_XBUTTON21:
+        case 0x800000:
             return 24;
-        case MOUSE_BUTTON_XBUTTON22:
+        case 0x1000000:
             return 25;
-        case MOUSE_BUTTON_XBUTTON23:
+        case 0x2000000:
             return 26;
-        case MOUSE_BUTTON_XBUTTON24:
+        case 0x4000000:
             return 27;
-        case MOUSE_BUTTON_XBUTTON25:
+        case 0x8000000:
             return 28;
-        case MOUSE_BUTTON_XBUTTON26:
+        case 0x10000000:
             return 29;
-        case MOUSE_BUTTON_XBUTTON27:
+        case 0x20000000:
             return 30;
-        case MOUSE_BUTTON_XBUTTON28:
+        case 0x40000000:
             return 31;
         default:
             return 0;
@@ -1768,67 +1774,67 @@ MOUSEBUTTON StringToMouseButton(const char* string) {
     }
 
     if (!SStrCmpI(string, "Button16", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON13);
+        return static_cast<MOUSEBUTTON>(0x8000);
     }
 
     if (!SStrCmpI(string, "Button17", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON14);
+        return static_cast<MOUSEBUTTON>(0x10000);
     }
 
     if (!SStrCmpI(string, "Button18", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON15);
+        return static_cast<MOUSEBUTTON>(0x20000);
     }
 
     if (!SStrCmpI(string, "Button19", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON16);
+        return static_cast<MOUSEBUTTON>(0x40000);
     }
 
     if (!SStrCmpI(string, "Button20", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON17);
+        return static_cast<MOUSEBUTTON>(0x80000);
     }
 
     if (!SStrCmpI(string, "Button21", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON18);
+        return static_cast<MOUSEBUTTON>(0x100000);
     }
 
     if (!SStrCmpI(string, "Button22", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON19);
+        return static_cast<MOUSEBUTTON>(0x200000);
     }
 
     if (!SStrCmpI(string, "Button23", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON20);
+        return static_cast<MOUSEBUTTON>(0x400000);
     }
 
     if (!SStrCmpI(string, "Button24", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON21);
+        return static_cast<MOUSEBUTTON>(0x800000);
     }
 
     if (!SStrCmpI(string, "Button25", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON22);
+        return static_cast<MOUSEBUTTON>(0x1000000);
     }
 
     if (!SStrCmpI(string, "Button26", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON23);
+        return static_cast<MOUSEBUTTON>(0x2000000);
     }
 
     if (!SStrCmpI(string, "Button27", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON24);
+        return static_cast<MOUSEBUTTON>(0x4000000);
     }
 
     if (!SStrCmpI(string, "Button28", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON25);
+        return static_cast<MOUSEBUTTON>(0x8000000);
     }
 
     if (!SStrCmpI(string, "Button29", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON26);
+        return static_cast<MOUSEBUTTON>(0x10000000);
     }
 
     if (!SStrCmpI(string, "Button30", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON27);
+        return static_cast<MOUSEBUTTON>(0x20000000);
     }
 
     if (!SStrCmpI(string, "Button31", STORM_MAX_STR)) {
-        return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON28);
+        return static_cast<MOUSEBUTTON>(0x40000000);
     }
 
     return MOUSE_BUTTON_NONE;
@@ -1884,52 +1890,52 @@ MOUSEBUTTON IndexToMouseButton(uint32_t index) {
             return static_cast<MOUSEBUTTON>(0x4000);
 
         case 16:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON13);
+            return static_cast<MOUSEBUTTON>(0x8000);
 
         case 17:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON14);
+            return static_cast<MOUSEBUTTON>(0x10000);
 
         case 18:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON15);
+            return static_cast<MOUSEBUTTON>(0x20000);
 
         case 19:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON16);
+            return static_cast<MOUSEBUTTON>(0x40000);
 
         case 20:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON17);
+            return static_cast<MOUSEBUTTON>(0x80000);
 
         case 21:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON18);
+            return static_cast<MOUSEBUTTON>(0x100000);
 
         case 22:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON19);
+            return static_cast<MOUSEBUTTON>(0x200000);
 
         case 23:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON20);
+            return static_cast<MOUSEBUTTON>(0x400000);
 
         case 24:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON21);
+            return static_cast<MOUSEBUTTON>(0x800000);
 
         case 25:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON22);
+            return static_cast<MOUSEBUTTON>(0x1000000);
 
         case 26:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON23);
+            return static_cast<MOUSEBUTTON>(0x2000000);
 
         case 27:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON24);
+            return static_cast<MOUSEBUTTON>(0x4000000);
 
         case 28:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON25);
+            return static_cast<MOUSEBUTTON>(0x8000000);
 
         case 29:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON26);
+            return static_cast<MOUSEBUTTON>(0x10000000);
 
         case 30:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON27);
+            return static_cast<MOUSEBUTTON>(0x20000000);
 
         case 31:
-            return static_cast<MOUSEBUTTON>(MOUSE_BUTTON_XBUTTON28);
+            return static_cast<MOUSEBUTTON>(0x40000000);
 
         default:
             return MOUSE_BUTTON_NONE;

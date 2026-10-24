@@ -191,7 +191,7 @@ void IOsSystemCpuLog(const CpuIdInfo* info) {
     HSLOG log;
     SLogCreate("Logs\\cpu.log", 0, &log);
 
-    if (s_processorVendor == OS_PROCESSOR_VENDOR_CPUID_FAILED) {
+    if (s_processorVendor == 4) {
         SLogWrite(log, "UNABLE TO IDENTIFY CPU");
         SLogClose(log);
         return;
@@ -626,14 +626,14 @@ uint32_t OsGetProcessorFeaturesEx(int32_t& vendor) {
         }
 
         if (!strncmp(info.m_vendor, s_vendorIds, 12)) {
-            s_processorVendor = OS_PROCESSOR_VENDOR_INTEL;
+            s_processorVendor = 1;
 
             if (info.m_maxStandard >= 4 && (info.m_standard4a >> 26)) {
                 features |= 0x40;
                 s_processorCores = static_cast<uint8_t>(info.m_standard4a >> 26) + 1;
             }
         } else if (!strncmp(info.m_vendor, s_vendorIds + 12, 12)) {
-            s_processorVendor = OS_PROCESSOR_VENDOR_AMD;
+            s_processorVendor = 2;
 
             uint8_t cores = static_cast<uint8_t>(info.m_extended8c);
 
@@ -645,7 +645,7 @@ uint32_t OsGetProcessorFeaturesEx(int32_t& vendor) {
             strncmp(info.m_vendor, s_vendorIds + 36, 12);
         }
     } else {
-        s_processorVendor = OS_PROCESSOR_VENDOR_CPUID_FAILED;
+        s_processorVendor = 4;
     }
 
     s_processorFeatures = features | 0x80000000;

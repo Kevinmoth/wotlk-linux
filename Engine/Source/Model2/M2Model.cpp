@@ -5,7 +5,11 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+#include "ThirdParty/sse2neon/sse2neon.h"
+#else
 #include <xmmintrin.h>
+#endif
 #if defined(_MSC_VER)
 #include <malloc.h>
 #else
@@ -21,6 +25,7 @@
 #include "Engine/Source/Gx/CGxPool.h"
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Model2/M2Cache.h"
+#include "Engine/Source/Os/Processor.h"
 #include "Engine/Source/Model2/M2ModelLight.h"
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Services/AsyncFile.h"
@@ -37,6 +42,603 @@
 #include "Engine/Source/Tempest/CMath.h"
 #include "WoW/Source/DB/DBClient/DBClient.h"
 #include "WoW/Source/Object/ObjectClient/Types.h"
+
+struct M2VertexUploadGpu {
+    CGxBuf* m_buf;
+    uint32_t m_lastDrawFrame;
+};
+
+struct M2VertexUploadSlot {
+    M2VertexUploadSlot* m_next;
+    M2SkinSection* m_section;
+    uint32_t m_frame;
+    int32_t m_optimized;
+    int32_t m_texCoord;
+    int32_t m_weighted;
+    int32_t m_active;
+    int32_t m_write;
+    uint32_t m_stride;
+    uint32_t m_vertexCount;
+    uint32_t m_visibleSig;
+    uint32_t m_boneCount;
+    uint16_t* m_boneIndex;
+    C44Matrix* m_bones;
+    CGxPool* m_pool;
+    M2VertexUploadGpu m_gpu[2];
+    uint8_t m_live;
+};
+
+struct M2VertexUploadCache {
+    M2VertexUploadSlot* m_slots;
+    M2VertexUploadSlot* m_pending;
+};
+
+static void M2DestroyUploadSlot(M2VertexUploadSlot* slot) {
+    if (g_theGxDevicePtr) {
+        if (slot->m_gpu[0].m_buf) {
+            g_theGxDevicePtr->BufDestroy(slot->m_gpu[0].m_buf);
+        }
+
+        if (slot->m_gpu[1].m_buf) {
+            g_theGxDevicePtr->BufDestroy(slot->m_gpu[1].m_buf);
+        }
+
+        if (slot->m_pool) {
+            g_theGxDevicePtr->PoolDestroy(slot->m_pool);
+        }
+    }
+
+    SMemFree(slot->m_boneIndex, __FILE__, __LINE__, 0);
+    SMemFree(slot->m_bones, __FILE__, __LINE__, 0);
+    SMemFree(slot, __FILE__, __LINE__, 0);
+}
+
+struct M2BindPoseBuf {
+    CM2Model* model;
+    M2SkinSection* section;
+    CGxPool* pool;
+    CGxBuf* buf;
+    uint32_t vertexCount;
+    M2BindPoseBuf* next;
+};
+
+static M2BindPoseBuf* s_bindPoses;
+
+static void M2ReleaseBindPoses(CM2Model* model) {
+    M2BindPoseBuf** link = &s_bindPoses;
+
+    while (*link) {
+        if ((*link)->model != model) {
+            link = &(*link)->next;
+            continue;
+        }
+
+        M2BindPoseBuf* dead = *link;
+        *link = dead->next;
+
+        if (g_theGxDevicePtr) {
+            if (dead->buf) {
+                g_theGxDevicePtr->BufDestroy(dead->buf);
+            }
+
+            if (dead->pool) {
+                g_theGxDevicePtr->PoolDestroy(dead->pool);
+            }
+        }
+
+        SMemFree(dead, __FILE__, __LINE__, 0);
+    }
+}
+
+static_assert(sizeof(M2Vertex) == 48, "M2Vertex must match GxVBF_PBNT2");
+
+static int32_t M2BindPoseLive(const M2BindPoseBuf* pose, uint32_t vertexCount) {
+    CGxBuf* buf = pose->buf;
+
+    return buf && pose->vertexCount == vertexCount && buf->m_hasData && buf->m_valid && buf->m_pool && buf->m_pool->m_apiSpecific;
+}
+
+static void M2BindPoseDrop(M2BindPoseBuf* pose) {
+    if (g_theGxDevicePtr) {
+        if (pose->buf) {
+            g_theGxDevicePtr->BufDestroy(pose->buf);
+        }
+
+        if (pose->pool) {
+            g_theGxDevicePtr->PoolDestroy(pose->pool);
+        }
+    }
+
+    pose->buf = nullptr;
+    pose->pool = nullptr;
+    pose->vertexCount = 0;
+}
+
+static int32_t M2BindPose(CM2Model* model, M2SkinSection* section) {
+    if (!g_theGxDevicePtr->GpuSkinSupported() || !section || !section->m_vertexCount || !model->m_shared || !model->m_shared->m_data) {
+        return 0;
+    }
+
+    M2Data* data = model->m_shared->m_data;
+    uint32_t boneCount = data->m_bones.m_count;
+
+    if (boneCount < 1 || boneCount > 256) {
+        return 0;
+    }
+
+    uint32_t vertexCount = section->m_vertexCount;
+
+    if (static_cast<uint32_t>(section->m_vertexStart) + vertexCount > data->m_vertices.m_count) {
+        return 0;
+    }
+
+    M2BindPoseBuf* pose = s_bindPoses;
+
+    while (pose && (pose->model != model || pose->section != section)) {
+        pose = pose->next;
+    }
+
+    if (pose && M2BindPoseLive(pose, vertexCount)) {
+        // ʕ •ᴥ•ʔ✿ Same section rebinds the mesh. Bone matrices change every frame and are not the key ✿ ʕ •ᴥ•ʔ
+        GxPrimVertexPtr(pose->buf, GxVBF_PBNT2);
+        return 1;
+    }
+
+    if (!pose) {
+        pose = static_cast<M2BindPoseBuf*>(SMemAlloc(sizeof(M2BindPoseBuf), __FILE__, __LINE__, 0));
+
+        if (!pose) {
+            return 0;
+        }
+
+        pose->model = model;
+        pose->section = section;
+        pose->pool = nullptr;
+        pose->buf = nullptr;
+        pose->vertexCount = 0;
+        pose->next = s_bindPoses;
+        s_bindPoses = pose;
+    } else if (pose->buf && pose->vertexCount != vertexCount) {
+        M2BindPoseDrop(pose);
+    }
+
+    if (!pose->buf) {
+        uint32_t bytes = vertexCount * static_cast<uint32_t>(sizeof(M2Vertex));
+        pose->pool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Vertex, GxPoolUsage_Static, static_cast<int32_t>(bytes), GxPoolHintBit_Unk1, "M2BindPose");
+
+        if (!pose->pool) {
+            return 0;
+        }
+
+        pose->buf = g_theGxDevicePtr->BufCreate(pose->pool, static_cast<uint32_t>(sizeof(M2Vertex)), vertexCount, 0);
+
+        if (!pose->buf) {
+            g_theGxDevicePtr->PoolDestroy(pose->pool);
+            pose->pool = nullptr;
+            return 0;
+        }
+
+        pose->vertexCount = vertexCount;
+    }
+
+    pose->buf->m_hasData = 0;
+    char* locked = g_theGxDevicePtr->BufLock(pose->buf);
+
+    if (!locked) {
+        return 0;
+    }
+
+    memcpy(locked, &data->m_vertices[section->m_vertexStart], vertexCount * sizeof(M2Vertex));
+    g_theGxDevicePtr->BufUnlock(pose->buf, 0);
+
+    if (!pose->buf->m_valid || !pose->buf->m_pool || !pose->buf->m_pool->m_apiSpecific) {
+        return 0;
+    }
+
+    pose->buf->m_hasData = 1;
+    GxPrimVertexPtr(pose->buf, GxVBF_PBNT2);
+    return 1;
+}
+
+static void M2ReleaseVertexUploads(CM2Model* model) {
+    M2ReleaseBindPoses(model);
+    M2VertexUploadCache* cache = model->m_vertexUploads;
+    model->m_vertexUploads = nullptr;
+
+    if (!cache) {
+        return;
+    }
+
+    M2VertexUploadSlot* slot = cache->m_slots;
+
+    while (slot) {
+        M2VertexUploadSlot* next = slot->m_next;
+        M2DestroyUploadSlot(slot);
+        slot = next;
+    }
+
+    SMemFree(cache, __FILE__, __LINE__, 0);
+}
+
+static int32_t M2NoteBone(uint8_t* seen, uint16_t* boneIndex, uint32_t* count, uint32_t bone, uint32_t limit) {
+    if (bone >= 256 || bone >= limit) {
+        return 0;
+    }
+
+    if (!seen[bone]) {
+        seen[bone] = 1;
+        boneIndex[*count] = static_cast<uint16_t>(bone);
+        *count += 1;
+    }
+
+    return 1;
+}
+
+static int32_t M2NoteSectionBones(CM2Model* model, M2SkinSection* section, int32_t weighted, uint8_t* seen, uint16_t* boneIndex, uint32_t* count, uint32_t limit) {
+    M2Data* data = model->m_shared->m_data;
+
+    if (!weighted && section->m_boneInfluences > 4) {
+        return 0;
+    }
+
+    if (static_cast<uint32_t>(section->m_vertexStart) + section->m_vertexCount > data->m_vertices.m_count) {
+        return 0;
+    }
+
+    M2Vertex* vertex = &data->m_vertices[section->m_vertexStart];
+    M2Vertex* end = vertex + section->m_vertexCount;
+    int32_t oneBone = !weighted && section->m_boneInfluences == 1;
+
+    for (; vertex != end; ++vertex) {
+        if (!M2NoteBone(seen, boneIndex, count, vertex->m_indices.b[0], limit)) {
+            return 0;
+        }
+
+        if (oneBone) {
+            continue;
+        }
+
+        for (uint32_t k = 1; k < 4 && vertex->m_weights.b[k]; ++k) {
+            if (!M2NoteBone(seen, boneIndex, count, vertex->m_indices.b[k], limit)) {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
+static int32_t M2SectionVisibleSig(CM2Model* model, M2SkinSection* section, int32_t optimized, uint32_t* sig) {
+    if (!optimized) {
+        *sig = 1;
+        return 1;
+    }
+
+    if (!model->m_optGeo || !model->m_skinSections || !model->m_shared || !model->m_shared->m_skinData) {
+        return 0;
+    }
+
+    M2SkinProfile* skin = model->m_shared->m_skinData;
+    M2BatchRange* range = &model->m_optGeo->m_batchRanges[section->m_skinSectionId];
+    uint32_t hash = 2166136261u;
+
+    for (uint32_t b = range->m_first; b <= range->m_last; ++b) {
+        uint16_t sectionIndex = skin->m_batches[b].m_skinSectionIndex;
+        hash ^= model->m_skinSections[sectionIndex] ? sectionIndex + 1u : 0u;
+        hash *= 16777619u;
+    }
+
+    *sig = hash ? hash : 1u;
+    return 1;
+}
+
+static int32_t M2CollectUploadBones(CM2Model* model, M2SkinSection* section, int32_t optimized, int32_t weighted, uint16_t* boneIndex, uint32_t* boneCount) {
+    uint8_t seen[256];
+    memset(seen, 0, sizeof(seen));
+    *boneCount = 0;
+
+    uint32_t limit = model->m_shared->m_data->m_bones.m_count;
+
+    if (!limit) {
+        return 0;
+    }
+
+    if (!optimized) {
+        return M2NoteSectionBones(model, section, weighted, seen, boneIndex, boneCount, limit) && *boneCount;
+    }
+
+    M2SkinProfile* skin = model->m_shared->m_skinData;
+    M2BatchRange* range = &model->m_optGeo->m_batchRanges[section->m_skinSectionId];
+
+    for (uint32_t b = range->m_first; b <= range->m_last; ++b) {
+        uint16_t sectionIndex = skin->m_batches[b].m_skinSectionIndex;
+
+        if (!model->m_skinSections[sectionIndex]) {
+            continue;
+        }
+
+        if (!M2NoteSectionBones(model, &skin->m_skinSections[sectionIndex], weighted, seen, boneIndex, boneCount, limit)) {
+            return 0;
+        }
+    }
+
+    return *boneCount != 0;
+}
+
+static int32_t M2UploadBonesMatch(CM2Model* model, const M2VertexUploadSlot* slot) {
+    if (!slot->m_live || !slot->m_boneCount || !slot->m_boneIndex || !slot->m_bones || !model->m_boneMatrices) {
+        return 0;
+    }
+
+    uint32_t limit = model->m_shared->m_data->m_bones.m_count;
+    uint32_t bytes = slot->m_boneCount * sizeof(C44Matrix);
+    uint8_t* packed = static_cast<uint8_t*>(alloca(bytes));
+
+    for (uint32_t i = 0; i < slot->m_boneCount; ++i) {
+        uint16_t bone = slot->m_boneIndex[i];
+
+        if (bone >= limit) {
+            return 0;
+        }
+
+        memcpy(packed + i * sizeof(C44Matrix), &model->m_boneMatrices[bone], sizeof(C44Matrix));
+    }
+
+    return memcmp(packed, slot->m_bones, bytes) == 0;
+}
+
+static M2VertexUploadSlot* M2FindUploadSlot(M2VertexUploadCache* cache, M2SkinSection* section, int32_t optimized, int32_t texCoord, int32_t weighted, uint32_t stride) {
+    for (M2VertexUploadSlot* slot = cache->m_slots; slot; slot = slot->m_next) {
+        if (slot->m_section == section && slot->m_optimized == optimized && slot->m_texCoord == texCoord && slot->m_weighted == weighted && slot->m_stride == stride) {
+            return slot;
+        }
+    }
+
+    return nullptr;
+}
+
+static int32_t M2EnsureUploadBones(M2VertexUploadSlot* slot, const uint16_t* boneIndex, uint32_t boneCount) {
+    if (slot->m_boneCount == boneCount && slot->m_boneIndex && slot->m_bones && memcmp(slot->m_boneIndex, boneIndex, boneCount * sizeof(uint16_t)) == 0) {
+        return 1;
+    }
+
+    SMemFree(slot->m_boneIndex, __FILE__, __LINE__, 0);
+    SMemFree(slot->m_bones, __FILE__, __LINE__, 0);
+    slot->m_boneIndex = nullptr;
+    slot->m_bones = nullptr;
+    slot->m_boneCount = 0;
+    slot->m_live = 0;
+    slot->m_boneIndex = static_cast<uint16_t*>(SMemAlloc(boneCount * sizeof(uint16_t), __FILE__, __LINE__, 0));
+    slot->m_bones = static_cast<C44Matrix*>(SMemAlloc(boneCount * sizeof(C44Matrix), __FILE__, __LINE__, 0));
+
+    if (!slot->m_boneIndex || !slot->m_bones) {
+        SMemFree(slot->m_boneIndex, __FILE__, __LINE__, 0);
+        SMemFree(slot->m_bones, __FILE__, __LINE__, 0);
+        slot->m_boneIndex = nullptr;
+        slot->m_bones = nullptr;
+        return 0;
+    }
+
+    memcpy(slot->m_boneIndex, boneIndex, boneCount * sizeof(uint16_t));
+    slot->m_boneCount = boneCount;
+    return 1;
+}
+
+static uint32_t M2UploadFrame(const CM2Model* model) {
+    if (model->m_scene) {
+        return model->m_scene->m_frameStamp;
+    }
+
+    return model->m_frameStamp;
+}
+
+static int32_t M2PickUploadBuf(const M2VertexUploadSlot* slot, uint32_t frame) {
+    int32_t fallback = -1;
+
+    for (int32_t i = 0; i < 2; ++i) {
+        uint32_t drawn = slot->m_gpu[i].m_lastDrawFrame;
+
+        // ʕ •ᴥ•ʔ✿ Two frames in flight, so a buffer drawn last frame is still on the GPU ✿ ʕ •ᴥ•ʔ
+        if (drawn != 0xFFFFFFFF && (frame < drawn || frame - drawn < 2)) {
+            continue;
+        }
+
+        if (i != slot->m_active) {
+            return i;
+        }
+
+        fallback = i;
+    }
+
+    return fallback;
+}
+
+static int32_t M2EnsureUploadBuf(M2VertexUploadSlot* slot, uint32_t stride, uint32_t vertexCount) {
+    if (slot->m_pool && slot->m_gpu[0].m_buf && slot->m_gpu[1].m_buf && slot->m_stride == stride && slot->m_vertexCount == vertexCount) {
+        return 1;
+    }
+
+    if (g_theGxDevicePtr) {
+        if (slot->m_gpu[0].m_buf) {
+            g_theGxDevicePtr->BufDestroy(slot->m_gpu[0].m_buf);
+        }
+
+        if (slot->m_gpu[1].m_buf) {
+            g_theGxDevicePtr->BufDestroy(slot->m_gpu[1].m_buf);
+        }
+
+        if (slot->m_pool) {
+            g_theGxDevicePtr->PoolDestroy(slot->m_pool);
+            slot->m_pool = nullptr;
+        }
+    }
+
+    slot->m_live = 0;
+    slot->m_active = -1;
+    slot->m_gpu[0].m_buf = nullptr;
+    slot->m_gpu[1].m_buf = nullptr;
+    slot->m_gpu[0].m_lastDrawFrame = 0xFFFFFFFF;
+    slot->m_gpu[1].m_lastDrawFrame = 0xFFFFFFFF;
+    uint32_t bytes = stride * vertexCount;
+    slot->m_pool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Vertex, GxPoolUsage_Static, static_cast<int32_t>(bytes * 2), GxPoolHintBit_Unk1, "M2Skin");
+
+    if (!slot->m_pool) {
+        return 0;
+    }
+
+    slot->m_gpu[0].m_buf = g_theGxDevicePtr->BufCreate(slot->m_pool, stride, vertexCount, 0);
+    slot->m_gpu[1].m_buf = g_theGxDevicePtr->BufCreate(slot->m_pool, stride, vertexCount, bytes);
+
+    if (!slot->m_gpu[0].m_buf || !slot->m_gpu[1].m_buf) {
+        if (slot->m_gpu[0].m_buf && g_theGxDevicePtr) {
+            g_theGxDevicePtr->BufDestroy(slot->m_gpu[0].m_buf);
+        }
+
+        if (slot->m_gpu[1].m_buf && g_theGxDevicePtr) {
+            g_theGxDevicePtr->BufDestroy(slot->m_gpu[1].m_buf);
+        }
+
+        if (g_theGxDevicePtr) {
+            g_theGxDevicePtr->PoolDestroy(slot->m_pool);
+        }
+
+        slot->m_pool = nullptr;
+        return 0;
+    }
+
+    slot->m_stride = stride;
+    slot->m_vertexCount = vertexCount;
+    return 1;
+}
+
+static int32_t M2BeginVertexUpload(CM2Model* model, M2SkinSection* section, int32_t optimized, int32_t texCoord, uint32_t stride, int32_t weighted, EGxVertexBufferFormat format, CGxBuf*& buf, uint8_t*& locked) {
+    buf = nullptr;
+    locked = nullptr;
+
+    if (model->m_vertexUploads) {
+        model->m_vertexUploads->m_pending = nullptr;
+    }
+
+    if (!section || !section->m_vertexCount || !stride || !model->m_boneMatrices || !model->m_shared || !model->m_shared->m_data) {
+        return 0;
+    }
+
+    uint32_t visibleSig = 0;
+
+    if (!M2SectionVisibleSig(model, section, optimized, &visibleSig)) {
+        return 0;
+    }
+
+    M2VertexUploadCache* cache = model->m_vertexUploads;
+    M2VertexUploadSlot* slot = cache ? M2FindUploadSlot(cache, section, optimized, texCoord, weighted, stride) : nullptr;
+
+    CGxBuf* activeBuf = slot && slot->m_active >= 0 ? slot->m_gpu[slot->m_active].m_buf : nullptr;
+
+    if (activeBuf && slot->m_live && slot->m_visibleSig == visibleSig && slot->m_vertexCount == section->m_vertexCount && activeBuf->m_hasData && activeBuf->m_valid && activeBuf->m_pool && activeBuf->m_pool->m_apiSpecific && M2UploadBonesMatch(model, slot)) {
+        // ʕ •ᴥ•ʔ✿ Section, frame, and these bones: memcmp match reuses the buffer. A new frame still skips when the bones match ✿ ʕ •ᴥ•ʔ
+        slot->m_frame = model->m_frameStamp;
+        slot->m_gpu[slot->m_active].m_lastDrawFrame = M2UploadFrame(model);
+        GxPrimVertexPtr(activeBuf, format);
+        return 1;
+    }
+
+    int32_t haveBones = slot && slot->m_boneCount && slot->m_boneIndex && slot->m_visibleSig == visibleSig && slot->m_vertexCount == section->m_vertexCount;
+    uint16_t boneIndex[256];
+    uint32_t boneCount = 0;
+
+    if (!haveBones && !M2CollectUploadBones(model, section, optimized, weighted, boneIndex, &boneCount)) {
+        return 0;
+    }
+
+    if (!cache) {
+        cache = static_cast<M2VertexUploadCache*>(SMemAlloc(sizeof(M2VertexUploadCache), __FILE__, __LINE__, 0));
+
+        if (!cache) {
+            return 0;
+        }
+
+        cache->m_slots = nullptr;
+        cache->m_pending = nullptr;
+        model->m_vertexUploads = cache;
+    }
+
+    if (!slot) {
+        slot = static_cast<M2VertexUploadSlot*>(SMemAlloc(sizeof(M2VertexUploadSlot), __FILE__, __LINE__, 0));
+
+        if (!slot) {
+            return 0;
+        }
+
+        memset(slot, 0, sizeof(*slot));
+        slot->m_section = section;
+        slot->m_optimized = optimized;
+        slot->m_texCoord = texCoord;
+        slot->m_weighted = weighted;
+        slot->m_stride = stride;
+        slot->m_active = -1;
+        slot->m_gpu[0].m_lastDrawFrame = 0xFFFFFFFF;
+        slot->m_gpu[1].m_lastDrawFrame = 0xFFFFFFFF;
+        slot->m_next = cache->m_slots;
+        cache->m_slots = slot;
+    }
+
+    slot->m_visibleSig = visibleSig;
+
+    if (!haveBones && !M2EnsureUploadBones(slot, boneIndex, boneCount)) {
+        return 0;
+    }
+
+    if (!M2EnsureUploadBuf(slot, stride, section->m_vertexCount)) {
+        return 0;
+    }
+
+    int32_t write = M2PickUploadBuf(slot, M2UploadFrame(model));
+
+    if (write < 0) {
+        return 0;
+    }
+
+    if (write == slot->m_active) {
+        slot->m_live = 0;
+    }
+
+    locked = reinterpret_cast<uint8_t*>(g_theGxDevicePtr->BufLock(slot->m_gpu[write].m_buf));
+
+    if (!locked) {
+        return 0;
+    }
+
+    buf = slot->m_gpu[write].m_buf;
+    slot->m_write = write;
+    cache->m_pending = slot;
+    return 0;
+}
+
+static void M2CommitVertexUpload(CM2Model* model) {
+    M2VertexUploadCache* cache = model->m_vertexUploads;
+
+    if (!cache || !cache->m_pending) {
+        return;
+    }
+
+    M2VertexUploadSlot* slot = cache->m_pending;
+    cache->m_pending = nullptr;
+    CGxBuf* written = slot->m_write >= 0 ? slot->m_gpu[slot->m_write].m_buf : nullptr;
+
+    if (!written || !written->m_hasData || !written->m_valid || !slot->m_boneCount || !slot->m_bones || !model->m_boneMatrices) {
+        slot->m_live = 0;
+        return;
+    }
+
+    for (uint32_t i = 0; i < slot->m_boneCount; ++i) {
+        memcpy(&slot->m_bones[i], &model->m_boneMatrices[slot->m_boneIndex[i]], sizeof(C44Matrix));
+    }
+
+    slot->m_active = slot->m_write;
+    slot->m_gpu[slot->m_write].m_lastDrawFrame = M2UploadFrame(model);
+    slot->m_frame = model->m_frameStamp;
+    slot->m_live = 1;
+}
 
 // STATIC: 0x00A45570
 static const uint32_t s_ribbonBlendModes[] = { 0, 1, 2, 10, 3, 4, 5 };
@@ -55,7 +657,7 @@ TSGrowableArray<M2ModelCallback> CM2Model::s_sequenceCallbacks;
 
 // INLINED
 CM2ModelCall::CM2ModelCall() {
-    this->m_type = MODEL_COMMAND_NOT_QUEUED;
+    this->m_type = 0xFFFFFFFF;
 }
 
 // VERIFY: 35d86a94 auto
@@ -245,7 +847,7 @@ void CM2Model::SetLightEnabled(uint32_t index, uint32_t enabled) {
     CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
     if (call) {
-        call->m_type = MODEL_SET_LIGHT_ENABLED;
+        call->m_type = 10;
         call->m_next = nullptr;
         call->m_time = this->m_scene->m_time;
         call->m_args[0] = index;
@@ -299,7 +901,7 @@ void CM2Model::SetRibbonsEnabled(uint32_t enabled) {
     CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
     if (call) {
-        call->m_type = MODEL_SET_RIBBONS_ENABLED;
+        call->m_type = 13;
         call->m_next = nullptr;
         call->m_time = this->m_scene->m_time;
         call->m_args[0] = enabled;
@@ -752,7 +1354,7 @@ void CM2Model::ReplaceTexture(uint32_t type, CTexture* texture) {
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_REPLACE_TEXTURE;
+            call->m_type = 0;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = type;
@@ -817,7 +1419,7 @@ void CM2Model::ReplaceParticleColor(uint32_t id, CImVector color0, CImVector col
     CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
     if (call) {
-        call->m_type = MODEL_REPLACE_PARTICLE_COLOR;
+        call->m_type = 11;
         call->m_next = nullptr;
         call->m_time = this->m_scene->m_time;
         call->m_args[0] = id;
@@ -1028,6 +1630,9 @@ void CM2Model::UnoptimizeVisibleGeometry() {
         return;
     }
 
+    // ʕ •ᴥ•ʔ✿ Opt sections are about to be freed, so drop uploads that point at them ✿ ʕ •ᴥ•ʔ
+    M2ReleaseVertexUploads(this);
+
     if (optGeo->m_indexBuf) {
         CGxBuf* buf = optGeo->m_indexBuf;
 
@@ -1150,6 +1755,17 @@ int32_t CM2Model::IsSequenceLoaded(uint32_t id) {
 // VERIFY: 89cf9cd8 manual
 // OFFSET: 0x008260C0
 uint16_t CM2Model::FindSequenceIndex(const M2Data* data, uint32_t id, int32_t variation) {
+    // ʕ •ᴥ•ʔ✿ Stand and idle hit the same sequence on every bone. The hash probe stays off that path ✿ ʕ •ᴥ•ʔ
+    static const M2Data* cachedData = nullptr;
+    static uint32_t cachedId = 0;
+    static int32_t cachedVar = 0;
+    static uint16_t cachedIndex = 0;
+    static int32_t cachedOk = 0;
+
+    if (cachedOk && cachedData == data && cachedId == id && cachedVar == variation) {
+        return cachedIndex;
+    }
+
     uint32_t hashCount = data->m_sequenceIdxHashById.m_count;
     uint32_t index = 0xFFFF;
 
@@ -1180,17 +1796,25 @@ uint16_t CM2Model::FindSequenceIndex(const M2Data* data, uint32_t id, int32_t va
     }
 
     uint32_t count = data->m_sequences.m_count;
+    int32_t requestedVariation = variation;
 
     while (index < count && variation) {
         index = data->m_sequences[index].m_variationNext;
         variation--;
     }
 
-    if (index >= count || variation) {
-        return 0xFFFF;
+    uint16_t result = 0xFFFF;
+
+    if (index < count && !variation) {
+        result = static_cast<uint16_t>(index);
     }
 
-    return static_cast<uint16_t>(index);
+    cachedData = data;
+    cachedId = id;
+    cachedVar = requestedVariation;
+    cachedIndex = result;
+    cachedOk = 1;
+    return result;
 }
 
 // VERIFY: 5546bff4 manual
@@ -1361,7 +1985,7 @@ void CM2Model::SetBoneFlags(uint32_t boneId, uint32_t flags, uint32_t mask) {
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_SET_BONE_FLAGS;
+            call->m_type = 4;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = boneId;
@@ -1704,7 +2328,7 @@ void CM2Model::SetBoneSequenceTime(uint32_t boneId, uint32_t time) {
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_SET_BONE_SEQUENCE_TIME;
+            call->m_type = 7;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = boneId;
@@ -1752,7 +2376,7 @@ void CM2Model::SetBoneSequenceSpeed(uint32_t boneId, float speed) {
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_SET_BONE_SEQUENCE_SPEED;
+            call->m_type = 8;
             call->m_next = nullptr;
             *reinterpret_cast<float*>(&call->m_args[1]) = speed;
             call->m_time = this->m_scene->m_time;
@@ -1804,7 +2428,7 @@ void CM2Model::LoadSequence(uint32_t id) {
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_LOAD_SEQUENCE;
+            call->m_type = 14;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = id;
@@ -1868,7 +2492,7 @@ void CM2Model::SetBoneProceduralTransform(uint32_t boneId, const C44Matrix& matr
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_SET_BONE_PROCEDURAL_TRANSFORM;
+            call->m_type = 9;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = boneId;
@@ -1928,9 +2552,22 @@ C3Vector CM2Model::GetAttachmentPivot(uint32_t id) {
     }
 
     M2Data* data = this->m_shared->m_data;
-    uint32_t index = id < data->m_attachmentIndicesById.m_count ? data->m_attachmentIndicesById[id] : 0xFFFFFFFF;
+    uint16_t index = id < data->m_attachmentIndicesById.m_count ? data->m_attachmentIndicesById[id] : 0xFFFF;
 
-    return data->m_attachments[index].m_position;
+    if (index >= data->m_attachments.m_count || !this->m_boneMatrices) {
+        return C3Vector(0.0f, 0.0f, 0.0f);
+    }
+
+    // ʕ •ᴥ•ʔ✿ File position is bone-local. The camera anchor is that point after the bone, still in model space. ✿ ʕ •ᴥ•ʔ
+    M2Attachment* attachment = &data->m_attachments[index];
+    uint16_t bone = attachment->m_bone;
+
+    if (bone >= data->m_bones.m_count) {
+        return attachment->m_position;
+    }
+
+    this->Animate();
+    return attachment->m_position * this->m_boneMatrices[bone];
 }
 
 // VERIFY: dca38176 manual
@@ -2148,7 +2785,7 @@ void CM2Model::SetEmittersEnabled(int32_t enabled) {
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_SET_EMITTERS_ENABLED;
+            call->m_type = 12;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = enabled;
@@ -2378,35 +3015,60 @@ void CM2Model::FindKey(M2ModelBoneSeq* sequence, const M2TrackBase& track, uint3
             while (key < count - 1 && keys[key + 1] <= time) {
                 key++;
             }
+        } else if (time < keys[0]) {
+            key = 0;
         } else {
-            uint32_t high = count;
+            // ʕ •ᴥ•ʔ✿ mid == 0 used to wrap high. The next probe then read past the track ✿ ʕ •ᴥ•ʔ
+            uint32_t low = 0;
+            uint32_t high = count - 1;
 
-            while (key < high) {
-                uint32_t mid = (high + key) >> 1;
+            while (low < high) {
+                uint32_t mid = (low + high + 1) >> 1;
 
-                if (time < keys[mid]) {
-                    high = mid - 1;
+                if (keys[mid] <= time) {
+                    low = mid;
                 } else {
-                    key = mid + 1;
-
-                    if (key >= count || time < keys[key]) {
-                        key = mid;
-                        break;
-                    }
+                    high = mid - 1;
                 }
             }
+
+            key = low;
         }
     }
 
-    if (key + 1 >= times.m_count) {
+    if (key >= count) {
+        key = count - 1;
+    }
+
+    uint32_t span = key + 1 < count ? keys[key + 1] - keys[key] : 0;
+
+    if (!span || time <= keys[key]) {
         key1 = key;
         key0 = key;
         ratio = 0.0f;
     } else {
         key0 = key;
         key1 = key + 1;
-        ratio = static_cast<float>(time - keys[key]) / static_cast<float>(keys[key + 1] - keys[key]);
+        ratio = static_cast<float>(time - keys[key]) / static_cast<float>(span);
     }
+}
+
+static C4Quaternion M2UnpackCompQuat(const M2CompQuat& key) {
+    C4Quaternion q;
+    q.x = key.m_values[0] * 0.000030518044f - 1.0f;
+    q.y = key.m_values[1] * 0.000030518044f - 1.0f;
+    q.z = key.m_values[2] * 0.000030518044f - 1.0f;
+    q.w = key.m_values[3] * 0.000030518044f - 1.0f;
+    return q;
+}
+
+static C4Quaternion M2LerpCompQuatKeys(const M2Track<M2CompQuat>& track, const M2Array<M2CompQuat>& keys, uint32_t i0, uint32_t i1, float ratio) {
+    if (track.m_trackType >= 2) {
+        const M2SplineKey<M2CompQuat>* spline = reinterpret_cast<const M2SplineKey<M2CompQuat>*>(keys.Data());
+        return C4Quaternion::Nlerp(ratio, M2UnpackCompQuat(spline[i0].m_value), M2UnpackCompQuat(spline[i1].m_value));
+    }
+
+    return C4Quaternion::Nlerp(ratio, M2UnpackCompQuat(keys[i0]), M2UnpackCompQuat(keys[i1]));
 }
 
 // VERIFY: 3e6ce0d8 auto
@@ -2421,32 +3083,16 @@ void M2AnimateTrack<M2CompQuat, C4Quaternion>(CM2Model* model, M2ModelBone* bone
         float ratio;
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
-            M2CompQuat& key = keys[modelTrack.m_currentKey];
-            modelTrack.m_currentValue.x = key.m_values[0] * 0.000030518044f - 1.0f;
-            modelTrack.m_currentValue.y = key.m_values[1] * 0.000030518044f - 1.0f;
-            modelTrack.m_currentValue.z = key.m_values[2] * 0.000030518044f - 1.0f;
-            modelTrack.m_currentValue.w = key.m_values[3] * 0.000030518044f - 1.0f;
+        if (!track.m_trackType) {
+            modelTrack.m_currentValue = M2UnpackCompQuat(keys[modelTrack.m_currentKey]);
             return;
         }
 
-        M2CompQuat& k0 = keys[modelTrack.m_currentKey];
-        M2CompQuat& k1 = keys[key1];
-        C4Quaternion q0;
-        q0.x = k0.m_values[0] * 0.000030518044f - 1.0f;
-        q0.y = k0.m_values[1] * 0.000030518044f - 1.0f;
-        q0.z = k0.m_values[2] * 0.000030518044f - 1.0f;
-        q0.w = k0.m_values[3] * 0.000030518044f - 1.0f;
-        C4Quaternion q1;
-        q1.x = k1.m_values[0] * 0.000030518044f - 1.0f;
-        q1.y = k1.m_values[1] * 0.000030518044f - 1.0f;
-        q1.z = k1.m_values[2] * 0.000030518044f - 1.0f;
-        q1.w = k1.m_values[3] * 0.000030518044f - 1.0f;
-        modelTrack.m_currentValue = C4Quaternion::Nlerp(ratio, q0, q1);
+        modelTrack.m_currentValue = M2LerpCompQuatKeys(track, keys, modelTrack.m_currentKey, key1, ratio);
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -2460,19 +3106,7 @@ void M2AnimateTrack<M2CompQuat, C4Quaternion>(CM2Model* model, M2ModelBone* bone
             uint32_t key1;
             float ratio;
             model->FindKey(&bone->m_secondarySequence, track, modelTrack.m_secondaryKey, key1, ratio);
-            M2CompQuat& k0 = blendKeys[modelTrack.m_secondaryKey];
-            M2CompQuat& k1 = blendKeys[key1];
-            C4Quaternion q0;
-            q0.x = k0.m_values[0] * 0.000030518044f - 1.0f;
-            q0.y = k0.m_values[1] * 0.000030518044f - 1.0f;
-            q0.z = k0.m_values[2] * 0.000030518044f - 1.0f;
-            q0.w = k0.m_values[3] * 0.000030518044f - 1.0f;
-            C4Quaternion q1;
-            q1.x = k1.m_values[0] * 0.000030518044f - 1.0f;
-            q1.y = k1.m_values[1] * 0.000030518044f - 1.0f;
-            q1.z = k1.m_values[2] * 0.000030518044f - 1.0f;
-            q1.w = k1.m_values[3] * 0.000030518044f - 1.0f;
-            blend = C4Quaternion::Nlerp(ratio, q0, q1);
+            blend = M2LerpCompQuatKeys(track, blendKeys, modelTrack.m_secondaryKey, key1, ratio);
         } else {
             blend = defaultValue;
         }
@@ -2554,6 +3188,10 @@ void CM2Model::AnimateST() {
     float deltaTime = elapsed * 0.001f;
     this->m_lastEmitterTime = time;
 
+    // ʕ •ᴥ•ʔ✿ Past 15 yards, skip ribbon and particle simulation. Riders stay attached: a mount's child is the player ✿ ʕ •ᴥ•ʔ
+    int32_t crowdLod = !this->m_attachParent && this->m_scaleSq > 225.0f;
+
+    if (!crowdLod) {
     for (uint32_t i = 0; i < data->m_ribbons.m_count; i++) {
         M2Ribbon* ribbonData = &data->m_ribbons[i];
         CRibbonEmitter* emitter = this->m_ribbonEmitters[i];
@@ -2592,6 +3230,46 @@ void CM2Model::AnimateST() {
     for (uint32_t i = 0; i < data->m_particles.m_count; i++) {
         this->AnimateParticleST(deltaTime, i);
     }
+    } else {
+        uint32_t forceParticles = 0;
+
+        for (uint32_t i = 0; i < data->m_particles.m_count; i++) {
+            if (this->m_particleEmitters[i]->m_flags & 0x400000) {
+                forceParticles = 1;
+                break;
+            }
+        }
+
+        if (forceParticles) {
+            for (uint32_t i = 0; i < data->m_particles.m_count; i++) {
+                this->AnimateParticleST(deltaTime, i);
+            }
+        } else if ((this->m_fFlags & 0x401) == 0x401 && (this->m_fFlags & 0x10000)) {
+        // ʕ •ᴥ•ʔ✿ Live quads still draw. Refresh the camera they subtract, and skip emission and integration ✿ ʕ •ᴥ•ʔ
+        static C44Matrix s_emitterRotation(0.0f, 1.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+        const C3Vector& viewPos = *reinterpret_cast<const C3Vector*>(&this->m_scene->m_viewInv.d0);
+        const C44Matrix* frame = static_cast<const C44Matrix*>(this->m_frameOfReference);
+
+        for (uint32_t i = 0; i < data->m_particles.m_count; i++) {
+            CParticleEmitter2* emitter = this->m_particleEmitters[i];
+
+            if (!this->m_particles[i].m_active || !emitter->HasLiveParticles()) {
+                continue;
+            }
+
+            M2Particle* particleData = &data->m_particles[i];
+            C44Matrix transform = this->m_boneMatrices[particleData->m_boneIndex];
+            transform.Translate(particleData->m_position);
+            transform *= this->m_scene->m_viewInv;
+            transform = s_emitterRotation * transform;
+            emitter->UpdateXform(transform, viewPos, frame);
+
+            for (uint32_t child = 0; child < emitter->m_childEmitterCount; child++) {
+                emitter->m_childEmitters[child]->UpdateXform(transform, viewPos, frame);
+            }
+        }
+        }
+    }
 
     if (this->m_fFlags & 8) {
         CM2Model** head = &this->m_scene->m_drawList;
@@ -2624,9 +3302,11 @@ void CM2Model::AnimateST() {
             hidden = this->m_attachments[child->m_attachmentIndex].m_currentValue == 0;
         }
 
-        if (!hidden) {
-            child->AnimateST();
+        if (hidden) {
+            continue;
         }
+
+        child->AnimateST();
     }
 
     if (this->m_effectiveAlpha == 1.0f) {
@@ -2693,11 +3373,36 @@ int32_t CM2Model::SetIndices() {
 // VERIFY: d0a96bb9 manual
 // OFFSET: 0x00829160
 int32_t CM2Model::SetVertices(int32_t optimized, M2SkinSection* section, int32_t texCoord) {
-    CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, 32, section->m_vertexCount);
-    uint8_t* vertices = reinterpret_cast<uint8_t*>(g_theGxDevicePtr->BufLock(buf));
+    CGxBuf* buf = nullptr;
+    uint8_t* vertices = nullptr;
+
+    // ʕ •ᴥ•ʔ✿ Bind-pose PBNT2. The PNT upload below still skins on the CPU ✿ ʕ •ᴥ•ʔ
+    if (!optimized && texCoord == 0 && M2BindPose(this, section)) {
+        g_theGxDevicePtr->GpuSkinMesh(1);
+        return 1;
+    }
+
+    if (M2BeginVertexUpload(this, section, optimized, texCoord, 32, 0, GxVBF_PNT, buf, vertices)) {
+        g_theGxDevicePtr->GpuSkinMesh(0);
+        return 1;
+    }
+
+    if (!vertices) {
+        buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, 32, section->m_vertexCount);
+        vertices = reinterpret_cast<uint8_t*>(g_theGxDevicePtr->BufLock(buf));
+    }
 
     if (!vertices) {
         return 0;
+    }
+
+    if (M2SkinTake(this, section, texCoord, optimized, vertices)) {
+        g_theGxDevicePtr->BufUnlock(buf, 0);
+        buf->m_hasData = 1;
+        GxPrimVertexPtr(buf, GxVBF_PNT);
+        M2CommitVertexUpload(this);
+        g_theGxDevicePtr->GpuSkinMesh(0);
+        return 1;
     }
 
     if (optimized) {
@@ -2720,6 +3425,8 @@ int32_t CM2Model::SetVertices(int32_t optimized, M2SkinSection* section, int32_t
     g_theGxDevicePtr->BufUnlock(buf, 0);
     buf->m_hasData = 1;
     GxPrimVertexPtr(buf, GxVBF_PNT);
+    M2CommitVertexUpload(this);
+    g_theGxDevicePtr->GpuSkinMesh(0);
     return 1;
 }
 
@@ -2748,6 +3455,11 @@ int32_t CM2Model::GetRegionBounds(M2SkinSection* section, CAaBox& box, C44Matrix
             weights = *reinterpret_cast<uint32_t*>(&vertex->m_weights);
             indices = *reinterpret_cast<uint32_t*>(&vertex->m_indices);
 
+#if defined(WOWDECOMP_AVX2_SKIN)
+            if (OsHasAvx2()) {
+                M2BlendBoneMatricesAVX2(this->m_boneMatrices, vertex->m_weights, vertex->m_indices, &transform);
+            } else
+#endif
             if (CM2Cache::s_processorFeatures & 4) {
                 M2BlendBoneMatricesSSE(this->m_boneMatrices, vertex->m_weights, vertex->m_indices, &transform);
             } else {
@@ -3247,6 +3959,15 @@ void CM2Model::TransformVerticesOneBone_sse(CM2Model* model, M2SkinSection* sect
     }
 }
 
+static C4Quaternion M2LerpQuatKeys(const M2Track<C4Quaternion>& track, const M2Array<C4Quaternion>& keys, uint32_t i0, uint32_t i1, float ratio) {
+    if (track.m_trackType < 2) {
+        return C4Quaternion::Nlerp(ratio, keys[i0], keys[i1]);
+    }
+
+    const M2SplineKey<C4Quaternion>* spline = reinterpret_cast<const M2SplineKey<C4Quaternion>*>(keys.Data());
+    return C4Quaternion::Nlerp(ratio, spline[i0].m_value, spline[i1].m_value);
+}
+
 // VERIFY: c111136b auto
 // OFFSET: 0x0082AD50
 template <>
@@ -3259,16 +3980,16 @@ void M2AnimateTrack<C4Quaternion, C4Quaternion>(CM2Model* model, M2ModelBone* bo
         float ratio;
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
 
-        modelTrack.m_currentValue = C4Quaternion::Nlerp(ratio, keys[modelTrack.m_currentKey], keys[key1]);
+        modelTrack.m_currentValue = M2LerpQuatKeys(track, keys, modelTrack.m_currentKey, key1, ratio);
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -3282,7 +4003,7 @@ void M2AnimateTrack<C4Quaternion, C4Quaternion>(CM2Model* model, M2ModelBone* bo
             uint32_t key1;
             float ratio;
             model->FindKey(&bone->m_secondarySequence, track, modelTrack.m_secondaryKey, key1, ratio);
-            blend = C4Quaternion::Nlerp(ratio, blendKeys[modelTrack.m_secondaryKey], blendKeys[key1]);
+            blend = M2LerpQuatKeys(track, blendKeys, modelTrack.m_secondaryKey, key1, ratio);
         } else {
             blend = defaultValue;
         }
@@ -3303,7 +4024,7 @@ void M2AnimateTrack<fixed16, float>(CM2Model* model, M2ModelBone* bone, const M2
         float ratio;
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey].m_value * 0.000030518509f;
             return;
         }
@@ -3313,7 +4034,7 @@ void M2AnimateTrack<fixed16, float>(CM2Model* model, M2ModelBone* bone, const M2
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -3337,6 +4058,48 @@ void M2AnimateTrack<fixed16, float>(CM2Model* model, M2ModelBone* bone, const M2
     }
 }
 
+// ʕ •ᴥ•ʔ✿ Types 2 and 3 store M2SplineKey values. A C3Vector stride reads the tangent as the next pose ✿ ʕ •ᴥ•ʔ
+static C3Vector M2LerpVectorKeys(const M2Track<C3Vector>& track, const M2Array<C3Vector>& keys, uint32_t i0, uint32_t i1, float ratio) {
+    if (track.m_trackType < 2) {
+        const C3Vector& value0 = keys[i0];
+        const C3Vector& value1 = keys[i1];
+        C3Vector value;
+        value.x = (value1.x - value0.x) * ratio + value0.x;
+        value.y = (value1.y - value0.y) * ratio + value0.y;
+        value.z = ratio * (value1.z - value0.z) + value0.z;
+        return value;
+    }
+
+    const M2SplineKey<C3Vector>* spline = reinterpret_cast<const M2SplineKey<C3Vector>*>(keys.Data());
+    const M2SplineKey<C3Vector>& k0 = spline[i0];
+    const M2SplineKey<C3Vector>& k1 = spline[i1];
+    C3Vector value;
+
+    if (track.m_trackType == 2) {
+        float r2 = ratio * ratio;
+        float r3 = r2 * ratio;
+        float b0 = r2 * 3.0f - r3 - ratio * 3.0f + 1.0f;
+        float b1 = ratio * 3.0f + r3 * 3.0f - r2 * 6.0f;
+        float b2 = r2 * 3.0f - r3 * 3.0f;
+        value.x = k0.m_outTan.x * b1 + k1.m_value.x * r3 + k1.m_inTan.x * b2 + k0.m_value.x * b0;
+        value.y = k1.m_inTan.y * b2 + k0.m_outTan.y * b1 + k0.m_value.y * b0 + k1.m_value.y * r3;
+        value.z = b0 * k0.m_value.z + (b1 * k0.m_outTan.z + b2 * k1.m_inTan.z) + r3 * k1.m_value.z;
+        return value;
+    }
+
+    float r2 = ratio * ratio;
+    float r2x3 = r2 * 3.0f;
+    float r3 = r2 * ratio;
+    float h3 = ratio + r3 - 2.0f * r2;
+    float h4 = r3 - r2;
+    float h1 = r3 * 2.0f - r2x3 + 1.0f;
+    float h2 = r2x3 - r3 * 2.0f;
+    value.x = k0.m_outTan.x * h3 + k1.m_inTan.x * h4 + k1.m_value.x * h2 + k0.m_value.x * h1;
+    value.y = k1.m_inTan.y * h4 + k0.m_outTan.y * h3 + k1.m_value.y * h2 + k0.m_value.y * h1;
+    value.z = h1 * k0.m_value.z + (h2 * k1.m_value.z + (h3 * k0.m_outTan.z + h4 * k1.m_inTan.z));
+    return value;
+}
+
 // VERIFY: 45a65fad auto
 // OFFSET: 0x0082B0A0
 template <>
@@ -3349,20 +4112,16 @@ void M2AnimateTrack<C3Vector, C3Vector>(CM2Model* model, M2ModelBone* bone, cons
         float ratio;
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
 
-        C3Vector& value0 = keys[modelTrack.m_currentKey];
-        C3Vector& value1 = keys[key1];
-        modelTrack.m_currentValue.x = (value1.x - value0.x) * ratio + value0.x;
-        modelTrack.m_currentValue.y = (value1.y - value0.y) * ratio + value0.y;
-        modelTrack.m_currentValue.z = ratio * (value1.z - value0.z) + value0.z;
+        modelTrack.m_currentValue = M2LerpVectorKeys(track, keys, modelTrack.m_currentKey, key1, ratio);
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -3376,11 +4135,7 @@ void M2AnimateTrack<C3Vector, C3Vector>(CM2Model* model, M2ModelBone* bone, cons
             uint32_t key1;
             float ratio;
             model->FindKey(&bone->m_secondarySequence, track, modelTrack.m_secondaryKey, key1, ratio);
-            C3Vector& value0 = blendKeys[modelTrack.m_secondaryKey];
-            C3Vector& value1 = blendKeys[key1];
-            blend.x = (value1.x - value0.x) * ratio + value0.x;
-            blend.y = (value1.y - value0.y) * ratio + value0.y;
-            blend.z = ratio * (value1.z - value0.z) + value0.z;
+            blend = M2LerpVectorKeys(track, blendKeys, modelTrack.m_secondaryKey, key1, ratio);
         } else {
             blend = defaultValue;
         }
@@ -3404,7 +4159,7 @@ void M2AnimateTrack<uint8_t, uint8_t>(CM2Model* model, M2ModelBone* bone, const 
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
@@ -3413,7 +4168,7 @@ void M2AnimateTrack<uint8_t, uint8_t>(CM2Model* model, M2ModelBone* bone, const 
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -3439,7 +4194,7 @@ void M2AnimateTrack<float, float>(CM2Model* model, M2ModelBone* bone, const M2Tr
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
@@ -3449,7 +4204,7 @@ void M2AnimateTrack<float, float>(CM2Model* model, M2ModelBone* bone, const M2Tr
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -3483,7 +4238,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey].m_value;
             return;
         }
@@ -3492,14 +4247,14 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
         M2SplineKey<C3Vector>& k1 = keys[key1];
 
         switch (track.m_trackType) {
-            case M2TRACK_LINEAR: {
+            case 1: {
                 modelTrack.m_currentValue.x = (k1.m_value.x - k0.m_value.x) * ratio + k0.m_value.x;
                 modelTrack.m_currentValue.y = (k1.m_value.y - k0.m_value.y) * ratio + k0.m_value.y;
                 modelTrack.m_currentValue.z = ratio * (k1.m_value.z - k0.m_value.z) + k0.m_value.z;
                 break;
             }
 
-            case M2TRACK_BEZIER: {
+            case 2: {
                 float r2 = ratio * ratio;
                 float r3 = ratio * ratio * ratio;
                 float b0 = ratio * ratio * 3.0f - r3 - ratio * 3.0f + 1.0f;
@@ -3511,7 +4266,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
                 break;
             }
 
-            case M2TRACK_HERMITE: {
+            case 3: {
                 float r2 = ratio * ratio;
                 float r2x3 = ratio * ratio * 3.0f;
                 float r3 = ratio * ratio * ratio;
@@ -3528,7 +4283,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -3543,7 +4298,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
             M2SplineKey<C3Vector>& k0 = blendKeys[modelTrack.m_secondaryKey];
             M2SplineKey<C3Vector>& k1 = blendKeys[key1];
 
-            if (track.m_trackType == M2TRACK_BEZIER) {
+            if (track.m_trackType == 2) {
                 float r2 = ratio * ratio;
                 float r3 = ratio * ratio * ratio;
                 float b0 = ratio * ratio * 3.0f - r3 - ratio * 3.0f + 1.0f;
@@ -3552,7 +4307,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
                 blend.x = k1.m_value.x * r3 + k0.m_value.x * b0 + b1 * k0.m_outTan.x + b2 * k1.m_inTan.x;
                 blend.y = k1.m_inTan.y * b2 + k0.m_outTan.y * b1 + k0.m_value.y * b0 + k1.m_value.y * r3;
                 blend.z = r3 * k1.m_value.z + (b0 * k0.m_value.z + b1 * k0.m_outTan.z + b2 * k1.m_inTan.z);
-            } else if (track.m_trackType == M2TRACK_HERMITE) {
+            } else if (track.m_trackType == 3) {
                 float r2 = ratio * ratio;
                 float r2x3 = ratio * ratio * 3.0f;
                 float r3 = ratio * ratio * ratio;
@@ -3591,7 +4346,7 @@ void M2AnimateSplineTrack<M2SplineKey<float>, float>(CM2Model* model, M2ModelBon
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey].m_value;
             return;
         }
@@ -3600,18 +4355,18 @@ void M2AnimateSplineTrack<M2SplineKey<float>, float>(CM2Model* model, M2ModelBon
         M2SplineKey<float>& k1 = keys[key1];
 
         switch (track.m_trackType) {
-            case M2TRACK_LINEAR: {
+            case 1: {
                 modelTrack.m_currentValue = k0.m_value + (k1.m_value - k0.m_value) * ratio;
                 break;
             }
 
-            case M2TRACK_BEZIER: {
+            case 2: {
                 float r3 = ratio * ratio * ratio;
                 modelTrack.m_currentValue = r3 * k1.m_value + (r3 * 3.0f - ratio * ratio * 6.0f + ratio * 3.0f) * k0.m_outTan + (3.0f * (ratio * ratio) - r3 * 3.0f) * k1.m_inTan + (3.0f * (ratio * ratio) - r3 - ratio * 3.0f + 1.0f) * k0.m_value;
                 break;
             }
 
-            case M2TRACK_HERMITE: {
+            case 3: {
                 float r3 = ratio * ratio * ratio;
                 modelTrack.m_currentValue = (ratio + r3 - 2.0f * (ratio * ratio)) * k0.m_outTan + (r3 - ratio * ratio) * k1.m_inTan + (r3 * 2.0f - ratio * ratio * 3.0f + 1.0f) * k0.m_value + (ratio * ratio * 3.0f - r3 * 2.0f) * k1.m_value;
                 break;
@@ -3620,7 +4375,7 @@ void M2AnimateSplineTrack<M2SplineKey<float>, float>(CM2Model* model, M2ModelBon
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -3635,10 +4390,10 @@ void M2AnimateSplineTrack<M2SplineKey<float>, float>(CM2Model* model, M2ModelBon
             M2SplineKey<float>& k0 = blendKeys[modelTrack.m_secondaryKey];
             M2SplineKey<float>& k1 = blendKeys[key1];
 
-            if (track.m_trackType == M2TRACK_BEZIER) {
+            if (track.m_trackType == 2) {
                 float r3 = ratio * ratio * ratio;
                 blend = r3 * k1.m_value + (r3 * 3.0f - ratio * ratio * 6.0f + ratio * 3.0f) * k0.m_outTan + (3.0f * (ratio * ratio) - r3 * 3.0f) * k1.m_inTan + (3.0f * (ratio * ratio) - r3 - ratio * 3.0f + 1.0f) * k0.m_value;
-            } else if (track.m_trackType == M2TRACK_HERMITE) {
+            } else if (track.m_trackType == 3) {
                 float r3 = ratio * ratio * ratio;
                 blend = (ratio + r3 - 2.0f * (ratio * ratio)) * k0.m_outTan + (r3 - ratio * ratio) * k1.m_inTan + (r3 * 2.0f - ratio * ratio * 3.0f + 1.0f) * k0.m_value + (ratio * ratio * 3.0f - r3 * 2.0f) * k1.m_value;
             } else {
@@ -3664,7 +4419,7 @@ void M2AnimateTrack<uint16_t, uint16_t>(CM2Model* model, M2ModelBone* bone, cons
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
@@ -3673,7 +4428,7 @@ void M2AnimateTrack<uint16_t, uint16_t>(CM2Model* model, M2ModelBone* bone, cons
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (track.m_trackType == M2TRACK_NONE) {
+        if (!track.m_trackType) {
             return;
         }
     }
@@ -3857,6 +4612,7 @@ CM2Model::CM2Model() {
     this->m_hitTestNext = nullptr;
     this->m_hitTestOwner = nullptr;
     this->m_hitTestGroup = 0;
+    this->m_vertexUploads = nullptr;
 
     if (!CM2Model::s_transformVertices[0]) {
         CM2Model::s_transformVertices[0] = CM2Model::TransformVertices_cpp;
@@ -3865,6 +4621,15 @@ CM2Model::CM2Model() {
         CM2Model::s_transformVertices[3] = CM2Model::TransformVertices_cpp;
         CM2Model::s_transformVertices[4] = CM2Model::TransformVertices_cpp;
 
+#if defined(WOWDECOMP_AVX2_SKIN)
+        if (OsHasAvx2()) {
+            CM2Model::s_transformVertices[0] = CM2Model::TransformVertices_avx2;
+            CM2Model::s_transformVertices[1] = CM2Model::TransformVerticesOneBone_avx2;
+            CM2Model::s_transformVertices[2] = CM2Model::TransformVertices_avx2;
+            CM2Model::s_transformVertices[3] = CM2Model::TransformVertices_avx2;
+            CM2Model::s_transformVertices[4] = CM2Model::TransformVertices_avx2;
+        } else
+#endif
         if (CM2Cache::s_processorFeatures & 4) {
             CM2Model::s_transformVertices[0] = CM2Model::TransformVertices_sse;
             CM2Model::s_transformVertices[1] = CM2Model::TransformVerticesOneBone_sse;
@@ -4051,7 +4816,7 @@ void CM2Model::SetGeometryVisible(uint32_t first, uint32_t last, int32_t visible
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_SET_GEOMETRY_VISIBLE;
+            call->m_type = 1;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = first;
@@ -4088,7 +4853,7 @@ void CM2Model::SetGeosetVisibilityRange(uint32_t first, uint32_t last, int32_t v
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_SET_GEOSET_VISIBILITY_RANGE;
+            call->m_type = 2;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = first;
@@ -4107,7 +4872,7 @@ void CM2Model::OptimizeVisibleGeometry() {
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_OPTIMIZE_VISIBLE_GEOSETS;
+            call->m_type = 3;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             *this->m_modelCallTail = call;
@@ -4498,8 +5263,21 @@ void CM2Model::AnimateTextureTransformsMT() {
 // VERIFY: bbe25130 manual
 // OFFSET: 0x0082D910
 int32_t CM2Model::SetVerticesMultiSample(int32_t optimized, M2SkinSection* section) {
-    CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, sizeof(M2VertexPNT2), section->m_vertexCount);
-    M2VertexPNT2* vertices = reinterpret_cast<M2VertexPNT2*>(g_theGxDevicePtr->BufLock(buf));
+    CGxBuf* buf = nullptr;
+    uint8_t* bytes = nullptr;
+
+    if (M2BeginVertexUpload(this, section, optimized, -1, sizeof(M2VertexPNT2), 1, GxVBF_PNT2, buf, bytes)) {
+        return 1;
+    }
+
+    M2VertexPNT2* vertices = nullptr;
+
+    if (bytes) {
+        vertices = reinterpret_cast<M2VertexPNT2*>(bytes);
+    } else {
+        buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, sizeof(M2VertexPNT2), section->m_vertexCount);
+        vertices = reinterpret_cast<M2VertexPNT2*>(g_theGxDevicePtr->BufLock(buf));
+    }
 
     if (!vertices) {
         return 0;
@@ -4525,6 +5303,7 @@ int32_t CM2Model::SetVerticesMultiSample(int32_t optimized, M2SkinSection* secti
     g_theGxDevicePtr->BufUnlock(buf, 0);
     buf->m_hasData = 1;
     GxPrimVertexPtr(buf, GxVBF_PNT2);
+    M2CommitVertexUpload(this);
     return 1;
 }
 
@@ -6676,6 +7455,7 @@ CM2Model::~CM2Model() {
         delete call;
     }
 
+    M2ReleaseVertexUploads(this);
     this->UnoptimizeVisibleGeometry();
     SIMD::FreeA16(this->m_boneMatrices);
     SIMD::FreeA16(this->m_textureMatrices);
@@ -6690,7 +7470,7 @@ void CM2Model::UnsetBoneSequence(uint32_t boneId, int32_t blend, int32_t primary
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_UNSET_BONE_SEQUENCE;
+            call->m_type = 6;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             call->m_args[0] = boneId;
@@ -6792,7 +7572,7 @@ void CM2Model::SetBoneSequence(uint32_t boneId, uint32_t sequenceId, uint32_t va
         CM2ModelCall* call = new (__FILE__, __LINE__) CM2ModelCall();
 
         if (call) {
-            call->m_type = MODEL_SET_BONE_SEQUENCE;
+            call->m_type = 5;
             call->m_next = nullptr;
             call->m_time = this->m_scene->m_time;
             *reinterpret_cast<float*>(&call->m_args[4]) = speed;
@@ -7389,41 +8169,41 @@ int32_t CM2Model::InitializeLoaded() {
 
             CParticleMat material;
             material.m_flags = 7;
-            material.m_blendMode = GxBlend_Opaque;
+            material.m_blendMode = 0;
 
             switch (particleData->m_blendMode) {
-                case M2PARTICLEBLEND_OPAQUE:
-                    material.m_blendMode = GxBlend_Opaque;
+                case 0:
+                    material.m_blendMode = 0;
                     material.m_flags |= 4;
                     break;
 
-                case M2PARTICLEBLEND_ALPHA_KEY:
-                    material.m_blendMode = GxBlend_AlphaKey;
+                case 1:
+                    material.m_blendMode = 1;
                     material.m_flags |= 4;
                     break;
 
-                case M2PARTICLEBLEND_ALPHA:
-                    material.m_blendMode = GxBlend_Alpha;
+                case 2:
+                    material.m_blendMode = 2;
                     material.m_flags &= ~4u;
                     break;
 
-                case M2PARTICLEBLEND_NO_ALPHA_ADD:
-                    material.m_blendMode = GxBlend_NoAlphaAdd;
+                case 3:
+                    material.m_blendMode = 10;
                     material.m_flags &= ~4u;
                     break;
 
-                case M2PARTICLEBLEND_ADD:
-                    material.m_blendMode = GxBlend_Add;
+                case 4:
+                    material.m_blendMode = 3;
                     material.m_flags &= ~4u;
                     break;
 
-                case M2PARTICLEBLEND_MOD:
-                    material.m_blendMode = GxBlend_Mod;
+                case 5:
+                    material.m_blendMode = 4;
                     material.m_flags &= ~4u;
                     break;
 
-                case M2PARTICLEBLEND_MOD2X:
-                    material.m_blendMode = GxBlend_Mod2x;
+                case 6:
+                    material.m_blendMode = 5;
                     material.m_flags &= ~4u;
                     break;
             }
@@ -7570,63 +8350,63 @@ int32_t CM2Model::InitializeLoaded() {
         this->m_scene->m_time = call->m_time;
 
         switch (call->m_type) {
-            case MODEL_REPLACE_TEXTURE:
+            case 0:
                 this->ReplaceTexture(call->m_args[0], reinterpret_cast<CTexture*>(call->m_args[1]));
                 break;
 
-            case MODEL_SET_GEOMETRY_VISIBLE:
+            case 1:
                 this->SetGeometryVisible(call->m_args[0], call->m_args[1], call->m_args[2]);
                 break;
 
-            case MODEL_SET_GEOSET_VISIBILITY_RANGE:
+            case 2:
                 this->SetGeosetVisibilityRange(call->m_args[0], call->m_args[1], call->m_args[2]);
                 break;
 
-            case MODEL_OPTIMIZE_VISIBLE_GEOSETS:
+            case 3:
                 this->OptimizeVisibleGeometry();
                 break;
 
-            case MODEL_SET_BONE_FLAGS:
+            case 4:
                 this->SetBoneFlags(call->m_args[0], call->m_args[1], call->m_args[2]);
                 break;
 
-            case MODEL_SET_BONE_SEQUENCE:
+            case 5:
                 this->SetBoneSequence(call->m_args[0], call->m_args[1], call->m_args[2], call->m_args[3], *reinterpret_cast<float*>(&call->m_args[4]), call->m_args[5], call->m_args[6]);
                 break;
 
-            case MODEL_UNSET_BONE_SEQUENCE:
+            case 6:
                 this->UnsetBoneSequence(call->m_args[0], call->m_args[1], call->m_args[2]);
                 break;
 
-            case MODEL_SET_BONE_SEQUENCE_TIME:
+            case 7:
                 this->SetBoneSequenceTime(call->m_args[0], call->m_args[1]);
                 break;
 
-            case MODEL_SET_BONE_SEQUENCE_SPEED:
+            case 8:
                 this->SetBoneSequenceSpeed(call->m_args[0], *reinterpret_cast<float*>(&call->m_args[1]));
                 break;
 
-            case MODEL_SET_BONE_PROCEDURAL_TRANSFORM:
+            case 9:
                 this->SetBoneProceduralTransform(call->m_args[0], *reinterpret_cast<C44Matrix*>(&call->m_args[1]));
                 break;
 
-            case MODEL_SET_LIGHT_ENABLED:
+            case 10:
                 this->SetLightEnabled(call->m_args[0], call->m_args[1]);
                 break;
 
-            case MODEL_REPLACE_PARTICLE_COLOR:
+            case 11:
                 this->ReplaceParticleColor(call->m_args[0], *reinterpret_cast<CImVector*>(&call->m_args[1]), *reinterpret_cast<CImVector*>(&call->m_args[2]), *reinterpret_cast<CImVector*>(&call->m_args[3]));
                 break;
 
-            case MODEL_SET_EMITTERS_ENABLED:
+            case 12:
                 this->SetEmittersEnabled(call->m_args[0]);
                 break;
 
-            case MODEL_SET_RIBBONS_ENABLED:
+            case 13:
                 this->SetRibbonsEnabled(call->m_args[0]);
                 break;
 
-            case MODEL_LOAD_SEQUENCE:
+            case 14:
                 this->LoadSequence(call->m_args[0]);
                 break;
         }
@@ -7730,7 +8510,7 @@ void CM2Model::GatherModelBatchesShadowMap(CModelBatchList& untextured, CModelBa
         M2Data* data = this->m_shared->m_data;
         M2Material* material = &data->m_materials[batch->m_materialIndex];
 
-        if ((material->m_flags & 0x40) || (!(material->m_flags & 0x80) && material->m_blendMode > M2BLEND_ALPHA_KEY)) {
+        if ((material->m_flags & 0x40) || (!(material->m_flags & 0x80) && material->m_blendMode > 1)) {
             continue;
         }
 

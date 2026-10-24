@@ -14,10 +14,10 @@
 #include "Engine/Source/Storm/H/stpl.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/WowSvcs/WowSvcsClient/ClientServices.h"
-#include "GameVersion.h"
 
 class CHashKeyGUID;
 class CWardenKey;
+class ItemStats_C;
 
 struct HASHKEY_INT {
     HASHKEY_INT();
@@ -189,7 +189,7 @@ void DBCache<T, TKey, THashKey>::Load() {
     uint32_t build;
     header.Get(build);
 
-    if (build != GAME_BUILD) {
+    if (build != 12340) {
         OsCloseFile(file);
         return;
     }
@@ -301,14 +301,24 @@ T* DBCache<T, TKey, THashKey>::GetRecord(TKey key, const WOWGUID& guid, void (*c
     DBCACHEHASH* hash = this->m_entries.Ptr(DBCacheHashKey(key), key);
 
     if (!hash) {
-        if (callback) {
+        bool request = callback != nullptr;
+
+#ifdef DISABLE_ITEM_CACHE
+        if constexpr (std::is_same<T, ItemStats_C>::value) {
+            request = true;
+        }
+#endif
+
+        if (request) {
             hash = this->m_entries.New(DBCacheHashKey(key), key, 0, 0);
             hash->m_id = key;
 
-            DBCACHECALLBACK* node = hash->m_callbacks.NewNode(2, 0, 0);
-            node->m_callback = callback;
-            node->m_guid = guid;
-            node->m_param = param;
+            if (callback) {
+                DBCACHECALLBACK* node = hash->m_callbacks.NewNode(2, 0, 0);
+                node->m_callback = callback;
+                node->m_guid = guid;
+                node->m_param = param;
+            }
 
             if (this->m_maxQueriesPerPump && this->m_queriesSent >= this->m_maxQueriesPerPump) {
                 this->m_pending.LinkToTail(hash);
@@ -376,6 +386,7 @@ template <class T, class TKey, class THashKey>
 void DBCache<T, TKey, THashKey>::SendSingleQuery(DBCACHEHASH* hash) {
     CDataStore msg;
     msg.Put(this->m_queryOpcode);
+    // ʕ •ᴥ•ʔ✿ This core reads CMSG_NAME_QUERY as a full uint64. A packed guid is short and the session throws the packet away. ✿ ʕ •ᴥ•ʔ
     DBCacheWriteKey(msg, hash->m_id);
 
     if (this->m_sendRequester) {
@@ -439,7 +450,7 @@ void DBCache<T, TKey, THashKey>::Save() {
 
     CDataStore header;
     header.Put(this->m_signature);
-    header.Put(static_cast<uint32_t>(GAME_BUILD));
+    header.Put(static_cast<uint32_t>(12340));
     header.Put(SFile::s_locale);
     header.Put(static_cast<uint32_t>(sizeof(T)));
     header.Put(T::s_cacheVersion);

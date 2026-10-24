@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include "Engine/Source/Gxu/GxuFontString.h"
+#include "Engine/Source/Gxu/IGxuFontGlyph.h"
 #include "Engine/Source/Gxu/GxuFontFont.h"
 #include "Engine/Source/Gxu/GxuFont.h"
 #include "Engine/Source/Gxu/GxuFontUtil.h"
@@ -53,7 +54,7 @@ GXUEMBEDDEDTEXTUREINFO::GXUEMBEDDEDTEXTUREINFO() {
 // VERIFY: f12e437f auto
 // OFFSET: 0x006C60C0
 EMBEDDEDPARSEINFO::EMBEDDEDPARSEINFO() {
-    this->m_state = HYPERLINKNONE;
+    this->m_state = 0;
     this->m_hyperlink.m_lineHeight = 0.0f;
     this->m_hyperlink.m_indentation = 0.0f;
     this->m_hyperlink.m_linkData = nullptr;
@@ -256,16 +257,18 @@ void CGxString::InitializeTextLine(const char* text, uint32_t numBytes, CImVecto
 
     float fontPixelHeight = ScreenToPixelHeight((this->m_flags >> 7) & 1, this->m_currentFontHeight);
     double pixelHeight = fontPixelHeight;
-    float scale = pixelHeight / this->m_currentFace->GetPixelSize();
+    bool msdf = this->m_currentFace->UsesMsdf();
+    float scale = pixelHeight / static_cast<float>(this->m_currentFace->GetPixelSize());
+    float msdfPad = msdf ? GxuFontMsdfRange() * scale : 0.0f;
     float cellHeight = ScreenToPixelHeight((this->m_flags >> 7) & 1, this->m_currentFontHeight);
 
-    if (this->m_currentFace->m_fontFlags & 8) {
+    if (!msdf && (this->m_currentFace->m_fontFlags & 8)) {
         cellHeight = cellHeight + 4.0;
-    } else if (this->m_currentFace->m_fontFlags & 1) {
+    } else if (!msdf && (this->m_currentFace->m_fontFlags & 1)) {
         cellHeight = cellHeight + 2.0;
     }
 
-    if (parseInfo.m_state == HYPERLINKDISPLAY) {
+    if (parseInfo.m_state == 1) {
         parseInfo.m_hyperlink.m_right = pos.x;
     }
 
@@ -319,11 +322,11 @@ void CGxString::InitializeTextLine(const char* text, uint32_t numBytes, CImVecto
                 }
 
                 case CODE_HYPERLINKSTART: {
-                    if (parseInfo.m_state != HYPERLINKNONE) {
+                    if (parseInfo.m_state != 0) {
                         break;
                     }
 
-                    parseInfo.m_state = HYPERLINKDISPLAY;
+                    parseInfo.m_state = 1;
                     parseInfo.m_hyperlink.m_linkData = text - advance + g_quotedCodeLengths[CODE_HYPERLINKSTART];
                     parseInfo.m_hyperlink.m_linkDataLength = advance - g_quotedCodeLengths[CODE_HYPERLINKSTOP] - g_quotedCodeLengths[CODE_HYPERLINKSTART];
                     parseInfo.m_hyperlink.m_linkText = text - advance;
@@ -351,19 +354,19 @@ void CGxString::InitializeTextLine(const char* text, uint32_t numBytes, CImVecto
                 }
 
                 case CODE_HYPERLINKSTOP: {
-                    if (parseInfo.m_state == HYPERLINKDISPLAY) {
+                    if (parseInfo.m_state == 1) {
                         parseInfo.m_hyperlink.m_right = x + pos.x;
-                    } else if (parseInfo.m_state != HYPERLINKTEXTURE) {
+                    } else if (parseInfo.m_state != 2) {
                         break;
                     }
 
-                    parseInfo.m_state = HYPERLINKNONE;
+                    parseInfo.m_state = 0;
                     this->AddHyperlinkParseInfo(parseInfo.m_hyperlink);
                     break;
                 }
 
                 case CODE_TEXTURESTART: {
-                    if (parseInfo.m_state == HYPERLINKTEXTURE) {
+                    if (parseInfo.m_state == 2) {
                         break;
                     }
 
@@ -391,9 +394,9 @@ void CGxString::InitializeTextLine(const char* text, uint32_t numBytes, CImVecto
                             x = 0.0;
                         }
 
-                        if (this->m_currentFace->m_fontFlags & 8) {
+                        if (!msdf && (this->m_currentFace->m_fontFlags & 8)) {
                             x = 4.0 * scale + x;
-                        } else if (this->m_currentFace->m_fontFlags & 1) {
+                        } else if (!msdf && (this->m_currentFace->m_fontFlags & 1)) {
                             x = scale + scale + x;
                         }
                     }
@@ -423,12 +426,12 @@ void CGxString::InitializeTextLine(const char* text, uint32_t numBytes, CImVecto
                     lastCode = 0;
                     step = 0.0f;
 
-                    if (parseInfo.m_state == HYPERLINKDISPLAY) {
+                    if (parseInfo.m_state == 1) {
                         parseInfo.m_hyperlink.m_lineHeight = texture.m_lineHeight;
                         parseInfo.m_hyperlink.m_indentation = texture.m_left;
                         parseInfo.m_hyperlink.m_baseLineHeight = texture.m_baseLineHeight;
                         parseInfo.m_hyperlink.m_right = texture.m_right;
-                        parseInfo.m_state = HYPERLINKTEXTURE;
+                        parseInfo.m_state = 2;
                     }
 
                     this->AddEmbeddedTextureParseInfo(texture);
@@ -449,6 +452,19 @@ void CGxString::InitializeTextLine(const char* text, uint32_t numBytes, CImVecto
                         if (!desc) {
                             break;
                         }
+                    }
+
+                    if (GxuFontGlyphIsLayoutWhitespace(wide)) {
+                        uint32_t flags = this->m_flags;
+
+                        if (!(flags & 0x80)) {
+                            x = x + 0.5f;
+                            x = floor(x);
+                        }
+
+                        pos.x = x + pos.x;
+                        lastCode = wide;
+                        break;
                     }
 
                     uint32_t texturePage = desc->m_textureNumber;
@@ -500,10 +516,12 @@ void CGxString::InitializeTextLine(const char* text, uint32_t numBytes, CImVecto
                         width = floor(width);
                     }
 
-                    if (this->m_currentFace->m_fontFlags & 8) {
+                    if (!msdf && (this->m_currentFace->m_fontFlags & 8)) {
                         vert.m_vc.y = vert.m_vc.y - 2.0;
-                    } else if (this->m_currentFace->m_fontFlags & 1) {
+                    } else if (!msdf && (this->m_currentFace->m_fontFlags & 1)) {
                         vert.m_vc.y = vert.m_vc.y - 1.0;
+                    } else if (msdf) {
+                        vert.m_vc.y = vert.m_vc.y - msdfPad;
                     }
 
                     vert.m_vc.y = desc->m_bitmapData.m_yOffset * scale + vert.m_vc.y;
@@ -517,14 +535,20 @@ void CGxString::InitializeTextLine(const char* text, uint32_t numBytes, CImVecto
                     verts[3].m_vc.x = width;
                     verts[2].m_vc.x = width;
 
-                    float top = (this->m_flags & 0x80 ? fontPixelHeight : cellHeight) + verts[3].m_vc.y;
+                    float quadHeight = this->m_flags & 0x80 ? fontPixelHeight : cellHeight;
+
+                    if (msdf) {
+                        quadHeight = quadHeight + msdfPad + msdfPad;
+                    }
+
+                    float top = quadHeight + verts[3].m_vc.y;
                     verts[3].m_vc.y = top;
                     verts[1].m_vc.y = top;
                     verts[0].m_vc.y = verts[2].m_vc.y;
 
                     CRect coords = desc->m_bitmapData.m_textureCoords;
 
-                    if (this->m_flags & 0x80) {
+                    if ((this->m_flags & 0x80) && !msdf) {
                         coords.minY = coords.minY + pixelAdjustments.minY;
                         coords.minX = coords.minX + pixelAdjustments.minX;
                         coords.maxY = coords.maxY + pixelAdjustments.maxY;
@@ -897,7 +921,7 @@ void CGxString::CreateGeometry() {
             }
         }
 
-        if (parseInfo.m_state == HYPERLINKDISPLAY) {
+        if (parseInfo.m_state == 1) {
             this->AddHyperlinkParseInfo(parseInfo.m_hyperlink);
         }
 

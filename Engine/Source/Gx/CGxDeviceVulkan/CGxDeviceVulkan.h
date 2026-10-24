@@ -3,75 +3,202 @@
 
 #include <cstddef>
 #include <cstdint>
-#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Vk.hpp"
-#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Pipelines.hpp"
-#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Texture.hpp"
+#include <unordered_map>
+#include <vector>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
-#include "Engine/Source/Storm/H/stpl.h"
+#include "Engine/Source/Gx/CGxDeviceVulkan/VkContext.h"
 
-// Not in the original: the Vulkan backend, a CGxDevice beside the D3D9 / D3D9Ex / OpenGL ones,
-// selected with the gxApi CVar ("Vulkan") or "-vulkan" on the command line. The engine above the
-// device is untouched; the Vulkan objects live in the engine-agnostic tier under Vulkan/ (the
-// loader, the context, device memory, the frame, the textures, the pipelines).
-//
-// What this device does today: its own window with the instance, device, surface and swapchain on
-// it; the engine's pools and buffers on VkBuffers (CGxDeviceVulkanPool.cpp); the engine's textures
-// as VkImages filled through the engine's own update protocol (CGxDeviceVulkanTexture.cpp); the
-// engine's "UI" and "Desaturate" shaders as the backend's own programs and every other stock
-// shader as the SPIR-V module Tools/VulkanShaders translated from its bytecode, found by the md5 of
-// the code through the manifest beside the executable -- a shader without one stays invalid so the
-// engine takes its fixed-function paths (CGxDeviceVulkanShader.cpp); every Draw recorded into the
-// frame's render pass with its texture stages, constant registers, the blend mode, the alpha test,
-// the stage-0 colour ops, the depth test and write, the culling, the colour mask, the fill mode and
-// the depth bias (CGxDeviceVulkanDraw.cpp); the engine's SceneClear as the pass's clear; the
-// engine's render targets as the frame's targets, with the back-buffer copies and the screenshot
-// read-back off the scene image (CGxDeviceVulkanTarget.cpp); occlusion queries on a query pool
-// (CGxDeviceVulkanQuery.cpp); the gamma ramp applied by the present pass; the hardware cursor as a
-// Win32 cursor built from the engine's cursor image (CGxDeviceVulkanCursor.cpp). Fixed-function
-// lighting and fog, user clip planes, multisampling and stereo are not offered (the caps say so),
-// and their virtuals keep the engine's bookkeeping only (CGxDeviceVulkanStubs.cpp).
+struct VkTexture {
+    VkImageAlloc image;
+    uint32_t width;
+    uint32_t height;
+    uint32_t levels;
+    int32_t renderTarget;
+    VkFramebuffer framebuffer;
+    uint32_t depthGeneration;
+    VkImageLayout layout;
+    uint8_t initialized;
+    uint32_t terrainSlot = ~0u;
+    uint32_t terrainEpoch = 0;
+    uint32_t terrainFrames = 0;
+    VkImageView terrainView = VK_NULL_HANDLE;
+    VkSampler terrainSampler = VK_NULL_HANDLE;
+};
+
+struct VkDrawUniforms {
+    C44Matrix world;
+    C44Matrix view;
+    C44Matrix proj;
+    C44Matrix texMatrix[2];
+    float matDiffuse[4];
+    float matEmissive[4];
+    float ambient[4];
+    float lightPos[4][4];
+    float lightDiffuse[4][4];
+    float lightAmbient[4][4];
+    float lightAtten[4][4];
+    float fogColor[4];
+    float fogParams[4];
+    int32_t stageColorOp[4];
+    int32_t stageAlphaOp[4];
+    int32_t stageTexGen[4];
+    int32_t stageTexMode[4];
+    int32_t stageCoord[4];
+    int32_t flags[4];
+    float misc[4];
+};
+
+// ʕ •ᴥ•ʔ✿ Must match the std140 layout of Shaders/FfpUniforms.glsl (checked by Tools/spirv-pin-compare.py) ✿ ʕ •ᴥ•ʔ
+static_assert(sizeof(VkDrawUniforms) == 768, "VkDrawUniforms must stay 768 bytes");
+
+struct VkPipelineKey {
+    uint8_t topology;
+    uint8_t blend;
+    uint8_t depthFunc;
+    uint8_t depthWrite;
+    uint8_t colorMask;
+    uint8_t cull;
+    uint8_t fill;
+    uint8_t pass;
+    uint8_t bindingCount;
+    uint8_t attribBinding[7];
+    uint8_t attribType[7];
+    uint8_t unused;
+    uint8_t bindless;
+    uint16_t attribOffset[7];
+    uint16_t bindingStride[6];
+
+    bool operator==(const VkPipelineKey& key) const;
+};
+
+struct VkPipelineKeyHash {
+    size_t operator()(const VkPipelineKey& key) const;
+};
+
 class CGxDeviceVulkan : public CGxDevice {
     public:
-    HWND m_hwnd;
-    ATOM m_hwndClass;
-    int32_t m_ownhwnd;
-    // The bring-up answered Retry (the window had no client area when the device was created, e.g.
-    // started minimised): finish it at the first present that finds a usable window.
-    int32_t m_vulkanPending;
-    // Device memory, the textures and the pipelines are up: buffers get VkBuffers, textures get
-    // images and draws are recorded. Without it the pools take the engine's emergency memory and
-    // the frame presents the clear colour only.
-    int32_t m_drawPath;
-    // The texture whose update protocol is running: its callback may bind textures and draw (the
-    // minimap renders into its texture from inside it), and must not re-enter its own update.
-    CGxTex* m_filling;
-    // The translated-shader manifest was looked for once (found or not) for this device.
-    int32_t m_manifestTried;
-    // The device's constant registers (D3D's SetVertexShaderConstantF / SetPixelShaderConstantF
-    // targets): the engine's shadow constants are moved here by their dirty ranges at each draw,
-    // and persist across the shadow's per-present clear as D3D's registers do.
-    float m_vertexRegs[256 * 4];
-    float m_pixelRegs[256 * 4];
-    // The hardware cursor: a Win32 cursor built from the engine's 32x32 cursor image, remade when
-    // the image changes (CursorUnlock), shown over the client area by WM_SETCURSOR.
-    HCURSOR m_hcursor;
-    int32_t m_hwCursorDirty;
+    enum {
+        MaxBindings = 6,
+        TerrainSlots = 65536,
+        DepthFunc_Always = 4,
+        BonePaletteCount = 256,
+    };
+
+    static const VkFormat s_gxTexFmtToVkFmt[GxTexFormats_Last];
+    static const VkPrimitiveTopology s_primitiveConversion[GxPrims_Last];
+    static const VkBlendFactor s_srcBlend[GxBlends_Last];
+    static const VkBlendFactor s_dstBlend[GxBlends_Last];
+    static const VkCompareOp s_cmpFunc[5];
+    static const VkFormat s_gxAttribToVkFormat[7];
+    static const uint32_t s_gxAttribSize[7];
+    static const int32_t s_gxAttribLocation[GxVAs_Last];
+    static EGxTexFormat s_gxTexFormatToUse[GxTexFormats_Last];
+
+    void* m_window = nullptr;
+    int32_t m_ownWindow = 0;
+    uintptr_t m_windowClass = 0;
+    VkContext m_vk;
+    VkDescriptorSetLayout m_setLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
+    VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;
+    VkShaderModule m_vertexModule = VK_NULL_HANDLE;
+    VkShaderModule m_fragmentModule = VK_NULL_HANDLE;
+    VkShaderModule m_terrainFragment = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_terrainSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_terrainPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_terrainPools[2] = {};
+    VkDescriptorSet m_terrainSets[2] = {};
+    uint32_t m_terrainEpoch = 0;
+    uint32_t m_terrainCount = 0;
+    int32_t m_bindless = 0;
+    std::unordered_map<VkPipelineKey, VkPipeline, VkPipelineKeyHash> m_pipelines;
+    VkPipelineKey m_lastPipelineKey = {};
+    VkPipeline m_lastPipeline = VK_NULL_HANDLE;
+    std::unordered_map<uint32_t, VkSampler> m_samplers;
+    VkBufferAlloc m_dummyVertices = {};
+    VkImageAlloc m_offscreenDepth = {};
+    VkExtent2D m_offscreenDepthExtent = {};
+    uint32_t m_offscreenDepthGeneration = 0;
+    CGxTex* m_defaultTexture = nullptr;
+    VkRenderPass m_postPass = VK_NULL_HANDLE;
+    VkPipeline m_postPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_postLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_postSetLayout = VK_NULL_HANDLE;
+    VkShaderModule m_postVertex = VK_NULL_HANDLE;
+    VkShaderModule m_postFragment = VK_NULL_HANDLE;
+    VkSampler m_postSampler = VK_NULL_HANDLE;
+    VkImageAlloc m_postColor = {};
+    VkImageLayout m_postColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkExtent2D m_postExtent = {};
+    VkFormat m_postFormat = VK_FORMAT_UNDEFINED;
+    VkSwapchainKHR m_postSwapchain = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> m_postFramebuffers;
+    int32_t m_swapchainDirty = 0;
+    VkExtent2D m_clientExtent = {};
+    int32_t m_imageStarved = 0;
+    int32_t m_frameActive = 0;
+    int32_t m_frameCleared = 0;
+    int32_t m_passActive = 0;
+    VkTexture* m_passTarget = nullptr;
+    int32_t m_targetInvalid = 0;
+    VkExtent2D m_targetExtent = {};
+    VkRect2D m_viewportRect = {};
+    VkViewport m_viewportVk = {};
+    VkRect2D m_scissorVk = {};
+    VkDrawUniforms m_uniforms = {};
+    VkDeviceSize m_uniformOffset = 0;
+    int32_t m_uniformsValid = 0;
+    uint32_t m_uniformEpoch = 0;
+    uint32_t m_uniformEpochBuilt = 0;
+    uint32_t m_uniformPrimMask = 0;
+    uint32_t m_uniformMasterEnables = 0;
+    int32_t m_uniformGpuDrawMode = 0;
+    int32_t m_uniformSkin = -1;
+    int32_t m_uniformDisableTex = -1;
+    int32_t m_skinActive = 0;
+    int32_t m_skinThisDraw = 0;
+    int32_t m_bindPoseMesh = 0;
+    uint32_t m_skinInfluences = 0;
+    int32_t m_uniformInfluences = -1;
+    VkDeviceSize m_skinOffset = 0;
+    VkDeviceSize m_skinOffsetThis = 0;
+    uint32_t m_skinMatrixBase = 0;
+    uint32_t m_skinMatrixBaseThis = 0;
+    uint32_t m_skinStride = 0;
+    uint32_t m_skinStrideThis = 0;
+    uint32_t m_pushBase = 0xFFFFFFFFu;
+    uint32_t m_pushInfluences = 0xFFFFFFFFu;
+    uint32_t m_pushStride = 0xFFFFFFFFu;
+    uint32_t m_boundBoneOffset = 0xFFFFFFFFu;
+    CGxApiLight m_uniformLights[4] = {};
+    VkPipeline m_boundPipeline = VK_NULL_HANDLE;
+    VkDescriptorSet m_boundSet = VK_NULL_HANDLE;
+    uint32_t m_boundDynamicOffset = 0xFFFFFFFFu;
+    VkImageView m_setViews[2] = {};
+    VkSampler m_setSamplers[2] = {};
+    VkBuffer m_boundBuffers[MaxBindings] = {};
+    VkDeviceSize m_boundOffsets[MaxBindings] = {};
+    VkBuffer m_boundIndexBuffer = VK_NULL_HANDLE;
+    int32_t m_gpuDrawMode = 0;
+    uint32_t m_drawInstances = 0;
+    uint32_t m_firstInstance = 0;
+    uint32_t m_indirectCount = 0;
+    VkDeviceSize m_indirectOffset = 0;
+    VkViewport m_boundViewport = {};
+    VkRect2D m_boundScissor = {};
+    float m_boundDepthBias = 0.0f;
+    float m_boundBlendFactor = 0.0f;
+    int32_t m_dynamicValid = 0;
+    float m_stereoConvergence = 1.0f;
+    float m_stereoSeparation = 25.0f;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
-    virtual void ICursorCreate(const CGxFormat& format);
-    virtual void ICursorDestroy();
-    virtual void ICursorDraw();
-    virtual void CursorSetVisible(int32_t visible);
-    virtual void CursorUnlock(uint32_t x, uint32_t y);
     virtual void IRsSendToHw(EGxRenderState which);
-    virtual ~CGxDeviceVulkan();
     virtual int32_t DeviceCreate(GxWindowProc windowProc, const CGxFormat& format);
     virtual int32_t DeviceCreate(void* window, const CGxFormat& format);
     virtual void DeviceDestroy();
     virtual int32_t DeviceSetFormat(const CGxFormat& format);
     virtual void DeviceSetBaseMipLevel(uint32_t level);
-    virtual void DeviceSetGamma(float gamma);
-    virtual void DeviceSetGamma(const CGxGammaRamp& ramp);
     virtual void* DeviceWindow();
     virtual void DeviceReadPixels(CiRect& rect, TSGrowableArray<CImVector>& pixels);
     virtual void DeviceReadDepths(CiRect& rect, TSGrowableArray<float>& depths);
@@ -84,10 +211,19 @@ class CGxDeviceVulkan : public CGxDevice {
     virtual void ScenePresent();
     virtual void SceneClear(uint32_t mask, CImVector color);
     virtual void XformSetProjection(const C44Matrix& matrix);
-    virtual void XformSetView(const C44Matrix& matrix);
     virtual void Draw(CGxBatch* batch, int32_t count);
-    virtual void PrimPointSize(float size);
-    virtual void PrimLineWidth(float width);
+    virtual int32_t GpuSkinBind(const C44Matrix* bones, uint32_t boneCount);
+    virtual int32_t GpuSkinBindInstances(const C44Matrix* const* bones, uint32_t instances, uint32_t boneCount);
+    virtual int32_t GpuSkinSupported() const;
+    virtual void DrawInstanced(CGxBatch* batch, const C44Matrix* worlds, uint32_t count);
+    virtual void GpuSkinMesh(int32_t bindPose);
+    virtual int32_t GpuSkinMesh() const;
+    virtual void GpuSkinInfluences(uint32_t count);
+    virtual int32_t DrawTerrainBatch(const GxTerrainDraw* draws, uint32_t count, int32_t mode = 2);
+    virtual int32_t TerrainBindless();
+    virtual uint32_t TerrainTextureSlot(CGxTex* tex);
+    virtual uint64_t ResidentHeapBytes() const;
+    virtual void ResolveTexMatrix(uint32_t tmu, C44Matrix& matrix);
     virtual void PoolSizeSet(CGxPool* pool, uint32_t size);
     virtual void PoolDestroy(CGxPool* pool);
     virtual char* BufLock(CGxBuf* buf);
@@ -96,15 +232,10 @@ class CGxDeviceVulkan : public CGxDevice {
     virtual void TexDestroy(CGxTex* texId);
     virtual int32_t TexCopy(CGxTex* dest, const C2iVector& destPos, const C2iVector& sourcePos, const C2iVector& size, uint32_t level, uint32_t plane);
     virtual int32_t TexStretch(CGxTex* dest, const CiRect* destRect, const CiRect* sourceRect, uint32_t level, uint32_t face);
-    virtual void QueryCreate(CGxQuery*& query, EGxQueryType type);
-    virtual void QueryDestroy(CGxQuery*& query);
     virtual bool QueryBegin(CGxQuery* query);
     virtual bool QueryEnd(CGxQuery* query);
     virtual bool QueryGetParam(CGxQuery* query, EGxQueryParam param, uint32_t& data);
     virtual bool QueryGetData(CGxQuery* query, uint32_t& data);
-    virtual void ShaderCreate(CGxShader** shaders, EGxShTarget target, const char* path, const char* name, uint32_t permutations);
-    virtual void ShaderDestroy(CGxShader*& shader);
-    virtual void ShaderConstantsSet(EGxShTarget target, uint32_t index, const float* constants, uint32_t count);
     virtual void IShaderReload(CGxShader* shader, const char* path, const char* name);
     virtual void IShaderCreate(CGxShader* shader);
     virtual void StereoSetConvergence(float convergence);
@@ -116,52 +247,57 @@ class CGxDeviceVulkan : public CGxDevice {
     virtual void DeviceUnk82();
     virtual void DeviceUnk83(uint32_t a, uint32_t b);
 
-    static LRESULT CALLBACK WindowProcVulkan(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
-
     CGxDeviceVulkan();
+    virtual ~CGxDeviceVulkan();
 
-    // CGxDeviceVulkan.cpp: the Vulkan side of the lifecycle
-    int32_t ICreateVulkan(const CGxFormat& format);
-    void ICreateDrawPath();
-    void IBringUpIfPending();
-    void IReleaseVulkanWindow();
-    void IDestroyVulkan();
-    void IStateSetDefaults();
-    // CGxDeviceVulkanWindow.cpp: the window
+    int32_t IPlatformInit();
+    void IPlatformShutdown();
     int32_t ICreateWindow(CGxFormat& format);
     void IDestroyWindow();
-    int32_t IWindowVisible();
-    void ISetWindowFocus(int32_t focus);
-    // CGxDeviceVulkanCaps.cpp
+    int32_t ICreateInstance();
+    VkSurfaceKHR ICreateSurface();
+    void IClientSize(uint32_t& width, uint32_t& height);
+
+    int32_t ICreateVulkan(const CGxFormat& format);
+    int32_t ICreateDeviceObjects();
+    void IDestroyVulkan();
+    int32_t IRecreateSwapchain();
     void ISetCaps(const CGxFormat& format);
-    // CGxDeviceVulkanPool.cpp: the pools on VkBuffers
-    char* IBufLock(CGxBuf* buf);
-    void IBufUnlock(CGxBuf* buf, uint32_t begin, uint32_t length);
-    int32_t IPoolBuffer(CGxPool* pool, VkBuffer& buffer);
-    void INoteBufDrawn(CGxBuf* buf);
+    void IStateSetDefaults();
+    void ISceneBegin();
+    void IReloadExperimentalShaders();
+    void ISceneEnd();
+    void IApplyPost();
+    int32_t IEnsurePost();
+    void IReleasePostTargets();
+    void IDestroyPost();
+    void ISceneAbort();
+    void IInvalidateCmdState();
+    void IBeginPass();
+    void IEndPass();
+    void IEnsureFrameImage();
+    VkBufferAlloc* IPoolBuffer(CGxPool* pool);
+    void IReleasePool(CGxPool* pool);
     void IReleasePools();
-    // CGxDeviceVulkanTexture.cpp: the textures as images
+    char* IBufLock(CGxBuf* buf);
+    void IBufUnlock(CGxBuf* buf);
     void ITexCreate(CGxTex* texId);
-    void ITexUpload(CGxTex* texId);
+    int32_t ITexUpload(CGxTex* texId);
+    void ITexRelease(CGxTex* texId);
     void ITexForceRecreation(int32_t all);
-    int32_t ITexResolve(CGxTex* texId, uint32_t stage, gxvk::vk::pipelines::Draw& draw);
-    gxvk::vk::texture::Image* ITexImage(CGxTex* texId);
-    void ITexTouch(CGxTex* texId);
-    void IReleaseTextures();
-    // CGxDeviceVulkanTarget.cpp: the render targets, the back-buffer copies, the read-back
-    int32_t ITargetImage(CGxTex* texId, gxvk::vk::texture::Image*& image, uint32_t plane, uint32_t& layer);
-    // CGxDeviceVulkanCursor.cpp: the hardware cursor
-    void ICursorApply();
-    int32_t ICursorInClient();
-    // CGxDeviceVulkanShader.cpp: the engine's shaders as the backend's own or translated programs
-    void IShaderFolder(char* folder, size_t size);
-    void IShaderConstantsFlush();
-    uint32_t IShaderPrograms(gxvk::vk::pipelines::Draw& draw);
-    // CGxDeviceVulkanDraw.cpp: the draw
-    int32_t IPlaceD3d(VkViewport& viewport, VkRect2D& scissor);
-    void IModelViewProj(float out[16]);
-    void IRenderStates(gxvk::vk::pipelines::Draw& draw);
-    void ITexTransforms(gxvk::vk::pipelines::Draw& draw);
+    VkTexture* ITexReady(CGxTex* texId);
+    VkFramebuffer ITexFramebuffer(VkTexture* texture);
+    VkSampler ISampler(const CGxTexFlags& flags);
+    VkPipeline IPipeline(const VkPipelineKey& key);
+    void ResetTerrainTable();
+    int32_t EnsureTerrainSet();
+    void ISetTexGen(uint32_t tmu, int32_t texGen);
+    void IXformTex(uint32_t tmu, int32_t& mode, C44Matrix& matrix);
+    void IBuildUniforms(VkDrawUniforms& uniforms);
+    void IXformSetViewport();
+    void IStateSyncScissorRect();
+    void ISetDynamicState();
+    int32_t IBlitFromBackBuffer(CGxTex* dest, const VkOffset3D* destBounds, const VkOffset3D* sourceBounds, uint32_t level, VkFilter filter);
 };
 
 CGxDevice* CreateCGxDeviceVulkan();

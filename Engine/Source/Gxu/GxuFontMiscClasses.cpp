@@ -14,8 +14,6 @@
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/Tempest/C44Matrix.h"
 
-static const double ONEOVERTEXSIZE = (1.0 / 256.0);
-
 // STATIC: 0x00AD9BCC
 TSList<TEXTLINETEXTURE, TSGetLink<TEXTLINETEXTURE> > TEXTLINETEXTURE::s_freeTextLineTextures;
 
@@ -82,14 +80,16 @@ GLYPHBITMAPDATA::~GLYPHBITMAPDATA() {
 void CHARCODEDESC::GenerateTextureCoords(uint32_t rowNumber, uint32_t cellHeight) {
     int32_t top = rowNumber * cellHeight;
     float left = this->m_glyphStartPixel;
+    float right = left + this->m_bitmapData.m_glyphCellWidth;
+    // ʕ •ᴥ•ʔ✿ Rows are packed flush. A sample on the edge reads the next row and draws a line above and below the glyph ✿ ʕ •ᴥ•ʔ
+    const float texel = 1.0f / 256.0f;
+    const float inset = 0.5f * texel;
 
     CRect coords;
-    coords.minY = top * ONEOVERTEXSIZE;
-    coords.minX = left * ONEOVERTEXSIZE;
-    coords.maxY = (top + cellHeight) * ONEOVERTEXSIZE;
-
-    float right = left + this->m_bitmapData.m_glyphCellWidth;
-    coords.maxX = ONEOVERTEXSIZE * right;
+    coords.minY = top * texel + inset;
+    coords.maxY = (top + cellHeight) * texel - inset;
+    coords.minX = left * texel + inset;
+    coords.maxX = right * texel - inset;
 
     this->m_bitmapData.m_textureCoords = coords;
 }
@@ -445,7 +445,7 @@ CHARCODEDESC* TEXTURECACHEROW::CreateNewDesc(GLYPHBITMAPDATA* data, uint32_t row
 
     this->m_widestFreeSlot = head->GapToPrevious();
 
-    if (this->m_widestFreeSlot >= width) {
+    if (this->m_widestFreeSlot >= width && head->m_glyphStartPixel >= width) {
         CHARCODEDESC* desc = new (__FILE__, __LINE__) CHARCODEDESC;
         this->m_glyphlist.LinkNode(desc, 2, head);
         desc->m_glyphEndPixel = head->m_glyphStartPixel - 1;
@@ -489,7 +489,6 @@ CHARCODEDESC* TEXTURECACHEROW::CreateNewDesc(GLYPHBITMAPDATA* data, uint32_t row
             desc->m_bitmapData.CopyFrom(data);
             desc->GenerateTextureCoords(rowNumber, cellHeight);
             inserted = 1;
-            next = desc;
         } else if (!next) {
             return nullptr;
         }
@@ -547,12 +546,15 @@ void CGxStringBatch::RenderBatch() {
         }
     }
 
+    bool fixedFunction = true;
+
     if (vertexShader && vertexShader->Valid() && g_fontPixelShader && g_fontPixelShader->Valid()) {
         C44Matrix viewProj;
         GxRsSet(GxRs_VertexShader, vertexShader);
         GxRsSet(GxRs_PixelShader, g_fontPixelShader);
         GxXformViewProjNativeTranspose(viewProj);
         GxShaderConstantsSet(GxSh_Vertex, 0, reinterpret_cast<const float*>(&viewProj), 4);
+        fixedFunction = false;
     } else {
         GxRsSet(GxRs_Lighting, 0);
         GxRsSet(GxRs_ColorOp0, 0);
@@ -563,6 +565,26 @@ void CGxStringBatch::RenderBatch() {
         if (!desc->m_strings.Head()) {
             desc = this->m_fontBatch.DeleteNode(desc);
             continue;
+        }
+
+        if (desc->m_face->UsesMsdf()) {
+            int32_t colorOp = 6;
+
+            if (desc->m_face->m_fontFlags & GxFontFlag_ThickOutline) {
+                colorOp = 8;
+            } else if (desc->m_face->m_fontFlags & GxFontFlag_Outline) {
+                colorOp = 7;
+            }
+
+            // ʕ •ᴥ•ʔ✿ The UI pixel shader does not sample a distance field. These faces stay on the fixed-function path ✿ ʕ •ᴥ•ʔ
+            GxRsSet(GxRs_PixelShader, nullptr);
+            GxRsSet(GxRs_Lighting, 0);
+            GxRsSet(GxRs_AlphaOp0, 0);
+            GxRsSet(GxRs_ColorOp0, colorOp);
+        } else if (fixedFunction) {
+            GxRsSet(GxRs_ColorOp0, 0);
+        } else if (g_fontPixelShader) {
+            GxRsSet(GxRs_PixelShader, g_fontPixelShader);
         }
 
         desc->RenderBatch();

@@ -49,7 +49,7 @@ class CGInputControl {
     /* 000C */ float m_dragAccumY;
     /* 0010 */ uint32_t m_lastMouseMoveFrame;
     /* 0014 */ uint32_t m_lookStartTime;
-    /* 0018 */ CGInputReleaseAction m_pendingDefaultAction;
+    /* 0018 */ PENDING_DEFAULT_ACTION m_pendingDefaultAction;
     /* 001C */ TSHashTable<MOUSELOOKBINDING, HASHKEY_STRI> m_mouseLookBindings;
     /* 0044 */ uint32_t m_facingOverrideActive;
     /* 0048 */ float m_facingOverride;
@@ -105,6 +105,7 @@ extern float s_vehicleAimNormPower;
 extern int32_t s_joystickMouseEnabled;
 
 uint32_t GetJoystick();
+void SetJoystick(uint32_t index);
 void CheckToCancelCurrentChannelSpell();
 void DescendStart();
 CGUnit_C* GetVehicleUnitPtr();
@@ -112,7 +113,9 @@ void InputControlDestroy();
 void InputControlInitialize();
 void __stdcall ScaleMouseDeltaByFov(float* dx, float* dy);
 bool JoystickCallback(CVar* var, const char* oldValue, const char* value, void* arg);
+void RegisterGamepadCVars();
 XMLTree* LoadJoystickConfig(XMLNode*& config);
+void ApplyJoystickConfig(XMLNode* config);
 bool WowMouseCVarCallback(CVar* var, const char* oldValue, const char* value, void* arg);
 
 void InputControlRegisterScriptFunctions();

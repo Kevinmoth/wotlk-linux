@@ -19,8 +19,6 @@ struct PORTRAITCACHE {
     /* 0008 */ TSGrowableArray<CImVector> m_texels;
     /* 0018 */ PORTRAITCACHE* m_prev;
     /* 001C */ PORTRAITCACHE* m_next;
-
-    PORTRAITCACHE();
 };
 
 struct PLAYERPORTRAIT : public TSHashObject<PLAYERPORTRAIT, CHashKeyGUID> {

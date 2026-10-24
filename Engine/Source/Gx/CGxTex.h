@@ -11,6 +11,25 @@
 
 class CGxTex;
 
+int32_t GxPageMapped(uintptr_t bits);
+
+// -- ʕ •ᴥ•ʔ✿ 47-bit userspace, aligned, and a page the process can read. A driver mapping is not a CGxTex. ✿ ʕ •ᴥ•ʔ
+inline int32_t GxCpuPtrOk(const void* value) {
+    uintptr_t bits = reinterpret_cast<uintptr_t>(value);
+
+    if (bits & (alignof(void*) - 1)) {
+        return 0;
+    }
+
+    uintptr_t top = bits >> 47;
+
+    if (top != 0 && top != 0x1ffff) {
+        return 0;
+    }
+
+    return GxPageMapped(bits);
+}
+
 typedef void (*GxTexUserFunc)(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t depth, uint32_t mipLevel, void* userArg, uint32_t& texelStrideInBytes, const void*& texels);
 
 class CGxTexParms {

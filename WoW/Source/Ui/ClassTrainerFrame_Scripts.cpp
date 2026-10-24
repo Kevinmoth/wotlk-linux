@@ -20,7 +20,6 @@
 #include "WoW/Source/Object/ItemStats.h"
 #include "WoW/Source/Object/ObjectClient/Item_C.h"
 #include "WoW/Source/Magic/MagicClient/Spell_C.h"
-#include "WoW/Source/Magic/MagicClient/SpellEnums.h"
 #include "WoW/Source/Ui/QuestTextParser.h"
 #include "WoW/Source/UIUtil/Tooltip.h"
 
@@ -41,7 +40,7 @@ static int32_t Script_GetNumTrainerServices(lua_State* L) {
 // VERIFY: ea1fc55f auto
 // OFFSET: 0x00593D50
 static int32_t Script_IsTradeskillTrainer(lua_State* L) {
-    if (CGClassTrainer::m_trainerType == TRAINER_TYPE_TRADESKILLS) {
+    if (CGClassTrainer::m_trainerType == 2) {
         lua_pushnumber(L, 1.0);
     } else {
         lua_pushnil(L);
@@ -167,7 +166,7 @@ static int32_t Script_IsTrainerServiceSkillStep(lua_State* L) {
 
             if (g_spellDB.GetRecord(service->m_spellID, &spell)) {
                 for (uint32_t i = 0; i < 3; i++) {
-                    if (spell.m_effect[i] == SPELL_EFFECT_SKILL_STEP) {
+                    if (spell.m_effect[i] == 44) {
                         lua_pushnumber(L, 1.0);
                         return 1;
                     }
@@ -239,7 +238,7 @@ static int32_t Script_GetTrainerServiceSkillLine(lua_State* L) {
         return 0;
     }
 
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
     uint32_t index = static_cast<uint32_t>(lua_tonumber(L, 1)) - 1;
     TrainerServiceInfo* service = index < CGClassTrainer::m_numServices ? CGClassTrainer::m_services.m_data[index] : nullptr;
 
@@ -256,10 +255,10 @@ static int32_t Script_GetTrainerServiceSkillLine(lua_State* L) {
 
                 SkillLineRec* skill;
 
-                if (effect == SPELL_EFFECT_SKILL_STEP) {
+                if (effect == 44) {
                     skill = g_skillLineDB.GetRecord(spell.m_effectMiscValue[i]);
                 } else {
-                    int32_t spellId = effect != SPELL_EFFECT_LEARN_SPELL || spell.m_implicitTargetA[i] == 5 ? spell.m_id : spell.m_effectTriggerSpell[i];
+                    int32_t spellId = effect != 36 || spell.m_implicitTargetA[i] == 5 ? spell.m_id : spell.m_effectTriggerSpell[i];
                     SkillLineAbilityRec* ability = SpellTableLookupAbility(player->m_unit->m_unitFieldBytes0[0], player->m_unit->m_unitFieldBytes0[1], spellId);
 
                     if (!ability) {
@@ -283,20 +282,20 @@ static int32_t Script_GetTrainerServiceSkillLine(lua_State* L) {
 
 // VERIFY: 800b7538 auto
 // OFFSET: 0x00593DB0
-static TRAINER_SERVICE GetServiceTypeFromString(const char* type) {
+static int32_t GetServiceTypeFromString(const char* type) {
     if (!type) {
-        return NUM_TRAINER_SERVICE_TYPES;
+        return 6;
     }
 
     if (!SStrCmpI(type, "available", STORM_MAX_STR)) {
-        return TRAINER_SERVICE_AVAILABLE;
+        return 0;
     }
 
     if (!SStrCmpI(type, "unavailable", STORM_MAX_STR)) {
-        return TRAINER_SERVICE_UNAVAILABLE;
+        return 1;
     }
 
-    return SStrCmpI(type, "used", STORM_MAX_STR) ? NUM_TRAINER_SERVICE_TYPES : TRAINER_SERVICE_USED;
+    return SStrCmpI(type, "used", STORM_MAX_STR) ? 6 : 2;
 }
 
 // VERIFY: e17cbd49 auto
@@ -307,9 +306,9 @@ static int32_t Script_GetTrainerServiceTypeFilter(lua_State* L) {
         return 0;
     }
 
-    TRAINER_SERVICE type = GetServiceTypeFromString(lua_tolstring(L, 1, nullptr));
+    int32_t type = GetServiceTypeFromString(lua_tolstring(L, 1, nullptr));
 
-    if (type == NUM_TRAINER_SERVICE_TYPES) {
+    if (type == 6) {
         luaL_error(L, "Bad service type in GetTrainerServiceTypeFilter");
         return 0;
     }
@@ -327,7 +326,7 @@ static int32_t Script_GetTrainerServiceTypeFilter(lua_State* L) {
 // OFFSET: 0x00594370
 static int32_t Script_CloseTrainer(lua_State* L) {
     WOWGUID none = WOWGUID();
-    CGClassTrainer::SetTrainer(none, TRAINER_TYPE_GENERAL);
+    CGClassTrainer::SetTrainer(none, 0);
     return 0;
 }
 
@@ -403,8 +402,8 @@ static int32_t Script_GetTrainerServiceIcon(lua_State* L) {
 
     ItemRec* item;
 
-    if (CGClassTrainer::m_trainerType == TRAINER_TYPE_TRADESKILLS && (spell.m_effect[0] == SPELL_EFFECT_CREATE_ITEM || spell.m_effect[0] == SPELL_EFFECT_CREATE_ITEM_2 || spell.m_effect[0] == SPELL_EFFECT_CREATE_RANDOM_ITEM) && (item = g_itemDB.GetRecord(spell.m_effectItemType[0]))) {
-        const char* path = ClientDBStringLookup(SLOOKUP_INVENTORYICONPATH);
+    if (CGClassTrainer::m_trainerType == 2 && (spell.m_effect[0] == 24 || spell.m_effect[0] == 157 || spell.m_effect[0] == 59) && (item = g_itemDB.GetRecord(spell.m_effectItemType[0]))) {
+        const char* path = ClientDBStringLookup(3);
         char texture[260];
         SStrPrintf(texture, sizeof(texture), "%s%s%s", path, *path ? "\\" : "", CGItem_C::GetInventoryArt(item->m_displayInfoID));
         lua_pushstring(L, texture);
@@ -543,7 +542,7 @@ static int32_t Script_GetTrainerServiceStepReq(lua_State* L) {
             int32_t effect;
 
             for (effect = 0; effect < 3; effect++) {
-                if (spell.m_effect[effect] == SPELL_EFFECT_SKILL_STEP) {
+                if (spell.m_effect[effect] == 44) {
                     break;
                 }
             }
@@ -607,7 +606,7 @@ static int32_t Script_GetTrainerServiceDescription(lua_State* L) {
                 return 1;
             }
 
-            if ((spell.m_attributes & 0x20) && (spell.m_effect[0] == SPELL_EFFECT_CREATE_ITEM || spell.m_effect[0] == SPELL_EFFECT_CREATE_ITEM_2 || spell.m_effect[0] == SPELL_EFFECT_CREATE_RANDOM_ITEM) && spell.m_effectItemType[0]) {
+            if ((spell.m_attributes & 0x20) && (spell.m_effect[0] == 24 || spell.m_effect[0] == 157 || spell.m_effect[0] == 59) && spell.m_effectItemType[0]) {
                 WOWGUID guid;
                 guid.m_guid = static_cast<uint32_t>(spell.m_id) | 0x1FE0000000000000ull;
                 ItemStats_C* stats = g_itemDBCache.GetRecord(spell.m_effectItemType[0], guid, TrainerItemCallback, nullptr, false);
@@ -642,12 +641,12 @@ static int32_t Script_GetTrainerServiceStepIncrease(lua_State* L) {
             int32_t effect;
 
             for (effect = 0; effect < 3; effect++) {
-                if (spell.m_effect[effect] == SPELL_EFFECT_SKILL_STEP) {
+                if (spell.m_effect[effect] == 44) {
                     break;
                 }
             }
 
-            if (effect < 3 && service->m_state != TRAINER_SERVICE_USED) {
+            if (effect < 3 && service->m_state != 2) {
                 int32_t previous = 0;
                 SpellRec step;
                 int32_t minPoints;
@@ -657,7 +656,7 @@ static int32_t Script_GetTrainerServiceStepIncrease(lua_State* L) {
                     int32_t stepEffect;
 
                     for (stepEffect = 0; stepEffect < 3; stepEffect++) {
-                        if (step.m_effect[stepEffect] == SPELL_EFFECT_SKILL_STEP) {
+                        if (step.m_effect[stepEffect] == 44) {
                             break;
                         }
                     }
@@ -724,9 +723,9 @@ static int32_t Script_SetTrainerServiceTypeFilter(lua_State* L) {
         return 0;
     }
 
-    TRAINER_SERVICE serviceType = GetServiceTypeFromString(type);
+    int32_t serviceType = GetServiceTypeFromString(type);
 
-    if (serviceType == NUM_TRAINER_SERVICE_TYPES) {
+    if (serviceType == 6) {
         luaL_error(L, "Bad service type in SetTrainerServiceTypeFilter");
         return 0;
     }
@@ -865,7 +864,7 @@ static int32_t Script_GetTrainerServiceItemLink(lua_State* L) {
     if (index < CGClassTrainer::m_numServices && (service = CGClassTrainer::m_services.m_data[index])) {
         SpellRec spell;
 
-        if (g_spellDB.GetRecord(service->m_spellID, &spell) && CGClassTrainer::m_trainerType == TRAINER_TYPE_TRADESKILLS && (spell.m_effect[0] == SPELL_EFFECT_CREATE_ITEM || spell.m_effect[0] == SPELL_EFFECT_CREATE_ITEM_2 || spell.m_effect[0] == SPELL_EFFECT_CREATE_RANDOM_ITEM) && spell.m_effectItemType[0]) {
+        if (g_spellDB.GetRecord(service->m_spellID, &spell) && CGClassTrainer::m_trainerType == 2 && (spell.m_effect[0] == 24 || spell.m_effect[0] == 157 || spell.m_effect[0] == 59) && spell.m_effectItemType[0]) {
             WOWGUID none = WOWGUID();
             ItemStats_C* stats = g_itemDBCache.GetRecord(spell.m_effectItemType[0], none, nullptr, nullptr, false);
 

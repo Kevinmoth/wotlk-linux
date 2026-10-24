@@ -15,7 +15,11 @@ CVar* s_cvEnableWowMouse;
 
 // VERIFY: a786a3e1 manual
 // OFFSET: 0x005F99F0
-static void ApplyJoystickConfig(XMLNode* config) {
+void ApplyJoystickConfig(XMLNode* config) {
+    if (GetJoystick() == 0xFFFFFFFF) {
+        return;
+    }
+
     char name[32];
 
     for (XMLNode* child = config->m_child; child; child = child->m_next) {
@@ -117,10 +121,77 @@ static void ApplyJoystickConfig(XMLNode* config) {
 
 // VERIFY: ff53c0b8 auto
 // OFFSET: 0x005F9C80
+static int32_t PadFlag(const char* name, int32_t fallback) {
+    CVar* var = CVar::Lookup(name);
+    return var ? var->m_intValue : fallback;
+}
+
+static float PadAmount(const char* name, float fallback) {
+    CVar* var = CVar::Lookup(name);
+    return var ? var->m_floatValue : fallback;
+}
+
+static void PushGamepadOptions() {
+    OsGamepadOptions options;
+    options.layout = PadFlag("padLayout", 0);
+    options.deadzone = PadAmount("padDeadzone", 0.18f);
+    options.lookSens = PadAmount("padLookSens", 1.0f);
+    options.cursorSpeed = PadAmount("padCursorSpeed", 16.0f);
+    options.invertY = PadFlag("padInvertY", 0);
+    options.strafe = PadFlag("padStrafe", 1);
+    options.south = PadFlag("padSouth", 1);
+    options.east = PadFlag("padEast", 1);
+    options.west = PadFlag("padWest", 1);
+    options.north = PadFlag("padNorth", 1);
+    options.shoulders = PadFlag("padShoulders", 1);
+    options.triggers = PadFlag("padTriggers", 1);
+    options.back = PadFlag("padBack", 1);
+    options.start = PadFlag("padStart", 1);
+    options.cursorToggle = PadFlag("padCursorToggle", 1);
+    options.autorun = PadFlag("padAutorun", 1);
+    options.dpad = PadFlag("padDpad", 1);
+    options.axisBindings = PadFlag("padAxisBindings", 0);
+    options.style = PadFlag("padStyle", 0);
+    OsGamepadSetOptions(&options);
+}
+
+static bool PadOptionsCallback(CVar*, const char*, const char*, void*) {
+    PushGamepadOptions();
+    return true;
+}
+
+static void RegisterPadCVar(const char* name, const char* help, const char* value) {
+    CVar::Register(name, help, 0, value, PadOptionsCallback, 5, false, nullptr, false);
+}
+
+void RegisterGamepadCVars() {
+    RegisterPadCVar("padLayout", "0 built-in layout, 1 Steam Input, 2 key bindings", "0");
+    RegisterPadCVar("padDeadzone", "gamepad stick deadzone", "0.18");
+    RegisterPadCVar("padLookSens", "gamepad look sensitivity", "1");
+    RegisterPadCVar("padCursorSpeed", "gamepad cursor speed", "16");
+    RegisterPadCVar("padInvertY", "invert gamepad look", "0");
+    RegisterPadCVar("padStrafe", "left stick strafes instead of turning", "1");
+    RegisterPadCVar("padSouth", "A jumps, or clicks while the cursor is out", "1");
+    RegisterPadCVar("padEast", "B cancels", "1");
+    RegisterPadCVar("padWest", "X interacts", "1");
+    RegisterPadCVar("padNorth", "Y sheathes", "1");
+    RegisterPadCVar("padShoulders", "shoulders change target", "1");
+    RegisterPadCVar("padTriggers", "triggers press action bar slots 1 and 2", "1");
+    RegisterPadCVar("padBack", "Select opens the map", "1");
+    RegisterPadCVar("padStart", "Start opens the menu", "1");
+    RegisterPadCVar("padCursorToggle", "right stick click toggles the cursor", "1");
+    RegisterPadCVar("padAutorun", "left stick click toggles autorun", "1");
+    RegisterPadCVar("padDpad", "d-pad opens character, bags, spellbook, and quests", "1");
+    RegisterPadCVar("padUI", "show the on-screen controller bar", "0");
+    RegisterPadCVar("padStyle", "0 auto, 1 standard pad, 2 GameCube", "0");
+    RegisterPadCVar("padAxisBindings", "bind stick directions instead of analog move and look", "0");
+    PushGamepadOptions();
+}
+
 bool JoystickCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
     if (*value == '1') {
-        if (s_joystick == 0xFFFFFFFF) {
-            s_joystick = OsJoystickOpen(0);
+        if (GetJoystick() == 0xFFFFFFFF) {
+            SetJoystick(OsJoystickOpen(0));
 
             if (s_joystick == 0xFFFFFFFF) {
                 return true;
@@ -137,9 +208,9 @@ bool JoystickCallback(CVar* var, const char* oldValue, const char* value, void* 
             ApplyJoystickConfig(config);
             XMLTree_Free(tree);
         }
-    } else if (s_joystick != 0xFFFFFFFF) {
+    } else if (GetJoystick() != 0xFFFFFFFF) {
         OsJoystickClose(s_joystick);
-        s_joystick = 0xFFFFFFFF;
+        SetJoystick(0xFFFFFFFF);
     }
 
     return true;

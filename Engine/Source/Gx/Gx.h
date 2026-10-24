@@ -9,8 +9,6 @@
 #include "Engine/Source/Storm/H/stpl.h"
 #include "Engine/Source/Tempest/C2iVector.h"
 
-static const float oo255 = (1.0f / 255.0f);
-
 class C2Vector;
 class C3Vector;
 class C44Matrix;
@@ -54,7 +52,6 @@ class GxDrawListEntry {
 CGxDevice* CreateCGxDeviceD3d();
 CGxDevice* CreateCGxDeviceD3d9Ex();
 CGxDevice* CreateCGxDeviceOpenGl();
-CGxDevice* CreateCGxDeviceVulkan();
 CGxDevice* CreateGxDevice(EGxApi api, GxWindowProc windowProc, const CGxFormat& format);
 int32_t GxAdapterDesktopMode(CGxMonitorMode& mode);
 int32_t GxAdapterID(uint16_t& vendorID, uint16_t& deviceID, uint32_t& driverVersionHi, uint32_t& driverVersionLo);

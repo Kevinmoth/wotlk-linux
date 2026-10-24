@@ -8,9 +8,6 @@
 #include "Engine/Source/Tempest/NTempest.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 
-static const int32_t WATERTEX_HEIGHT = 64;
-static const float kDeepDarken = 0.9f;
-
 // STATIC: 0x00D43B48
 uint8_t Liquid::s_unk_D43B48[4];
 
@@ -91,13 +88,13 @@ void Liquid::CreateProceduralTextures() {
     Liquid::s_unk_D43B48[0] = 0;
 
     CGxTexFlags flags;
-    Liquid::s_riverDepthTex = TextureCreate(8, WATERTEX_HEIGHT, GxTex_Argb8888, GxTex_Argb8888, flags, reinterpret_cast<void*>(1), Liquid::ExtWaterDepthTexCallback, "proceduralRiverDepthTex", 0);
+    Liquid::s_riverDepthTex = TextureCreate(8, 64, GxTex_Argb8888, GxTex_Argb8888, flags, reinterpret_cast<void*>(1), Liquid::ExtWaterDepthTexCallback, "proceduralRiverDepthTex", 0);
 
     flags = CGxTexFlags();
-    Liquid::s_oceanDepthTex = TextureCreate(8, WATERTEX_HEIGHT, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, Liquid::ExtWaterDepthTexCallback, "proceduralOceanDepthTex", 0);
+    Liquid::s_oceanDepthTex = TextureCreate(8, 64, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, Liquid::ExtWaterDepthTexCallback, "proceduralOceanDepthTex", 0);
 
     flags = CGxTexFlags();
-    Liquid::s_wmoWaterTex = TextureCreate(8, WATERTEX_HEIGHT, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, Liquid::WmoWaterTexCallback, "proceduralWmoWaterTex", 0);
+    Liquid::s_wmoWaterTex = TextureCreate(8, 64, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, Liquid::WmoWaterTexCallback, "proceduralWmoWaterTex", 0);
 
     Liquid::CacheProceduralTextures();
 }
@@ -112,7 +109,7 @@ void Liquid::UpdateProceduralTextures() {
             CiRect rect;
             rect.minY = 0;
             rect.minX = 0;
-            rect.maxY = WATERTEX_HEIGHT;
+            rect.maxY = 64;
             rect.maxX = 8;
             GxTexUpdate(gxTex, rect, 0);
             Liquid::s_unk_D43B48[3] = 1;
@@ -126,7 +123,7 @@ void Liquid::UpdateProceduralTextures() {
             CiRect rect;
             rect.minY = 0;
             rect.minX = 0;
-            rect.maxY = WATERTEX_HEIGHT;
+            rect.maxY = 64;
             rect.maxX = 8;
             GxTexUpdate(gxTex, rect, 0);
             Liquid::s_unk_D43B48[2] = 1;
@@ -140,7 +137,7 @@ void Liquid::UpdateProceduralTextures() {
             CiRect rect;
             rect.minY = 0;
             rect.minX = 0;
-            rect.maxY = WATERTEX_HEIGHT;
+            rect.maxY = 64;
             rect.maxX = 8;
             GxTexUpdate(gxTex, rect, 0);
             Liquid::s_unk_D43B48[1] = 1;
@@ -178,7 +175,7 @@ void Liquid::InvalidateProceduralTextures() {
 // OFFSET: 0x008A2AC0
 void Liquid::WmoWaterTexCallback(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t depth, uint32_t mipLevel, void* userArg, uint32_t& texelStrideInBytes, const void*& texels) {
     // STATIC: 0x00D43BE0
-    static CImVector s_texels[WATERTEX_HEIGHT * 8];
+    static CImVector s_texels[64 * 8];
 
     if (command != GxTex_Latch) {
         return;
@@ -201,7 +198,7 @@ void Liquid::WmoWaterTexCallback(EGxTexCommand command, uint32_t width, uint32_t
     white.g = 0xFF;
     white.r = 0xFF;
 
-    for (uint32_t y = 0; y < WATERTEX_HEIGHT; y++) {
+    for (uint32_t y = 0; y < 64; y++) {
         for (uint32_t x = 0; x < 4; x++) {
             color.a = alpha >> 8;
             s_texels[y * 8 + x] = color;
@@ -223,7 +220,7 @@ void Liquid::WmoWaterTexCallback(EGxTexCommand command, uint32_t width, uint32_t
 // OFFSET: 0x008A2BF0
 void Liquid::ExtWaterDepthTexCallback(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t depth, uint32_t mipLevel, void* userArg, uint32_t& texelStrideInBytes, const void*& texels) {
     // STATIC: 0x00D443E8
-    static CImVector s_texels[WATERTEX_HEIGHT * 8];
+    static CImVector s_texels[64 * 8];
 
     if (command != GxTex_Latch) {
         return;
@@ -266,7 +263,7 @@ void Liquid::ExtWaterDepthTexCallback(EGxTexCommand command, uint32_t width, uin
             C3Vector rgb(color);
             C3Vector hsv;
             RGBtoHSV(rgb, hsv);
-            hsv.z *= kDeepDarken;
+            hsv.z *= 0.9f;
             HSVtoRGB(hsv, rgb);
             color = rgb;
         }

@@ -11,8 +11,6 @@
 #include "Engine/Source/Tempest/C44Matrix.h"
 #include "Engine/Source/Tempest/C4Vector.h"
 
-static const float MIN_EDGE_LIFE_SPAN = 0.25f;
-
 // STATIC: 0x00B2D658
 static int32_t s_ribbonRenderEnable = 1;
 
@@ -407,8 +405,8 @@ CRibbonEmitter::CRibbonEmitter() {
 void CRibbonEmitter::Initialize(float edgesPerSecond, float edgeLifetime, const CImVector& color, const TSGrowableArray<CTexture*>& textures, const TSGrowableArray<CRibbonMat>& materials, const TSGrowableArray<uint32_t>& textureTypes, const CAaRect& texCoords, uint32_t rows, uint32_t cols) {
     float edgesPerSec = ceil(edgesPerSecond);
 
-    if (edgeLifetime < MIN_EDGE_LIFE_SPAN) {
-        edgeLifetime = MIN_EDGE_LIFE_SPAN;
+    if (edgeLifetime < 0.25f) {
+        edgeLifetime = 0.25f;
     }
 
     uint32_t edgeCount = static_cast<uint32_t>(ceil(edgesPerSec * edgeLifetime) + 2.0f);

@@ -9,6 +9,19 @@
 #include "Engine/Source/Gxu/Types.h"
 #include "Engine/Source/Storm/H/stpl.h"
 
+// ʕ •ᴥ•ʔ✿ Outline flags match the retail font bits. MSDF is opt-in and sampled in Ffp.frag ✿ ʕ •ᴥ•ʔ
+enum GxFontFlags {
+    GxFontFlag_Outline = 0x1,
+    GxFontFlag_Monochrome = 0x2,
+    GxFontFlag_Filter = 0x4,
+    GxFontFlag_ThickOutline = 0x8,
+    GxFontFlag_Msdf = 0x10,
+    GxFontFlag_MsdfExplicit = 0x20,
+};
+
+// ʕ •ᴥ•ʔ✿ Atlas texels of signed distance around the em. Ffp.frag and the 256px page use the same range ✿ ʕ •ᴥ•ʔ
+float GxuFontMsdfRange();
+
 struct KERNINGHASHKEY {
     /* 0000 */ uint32_t m_code;
 
@@ -36,6 +49,7 @@ struct CGxFont : public TSLinkedNode<CGxFont> {
     /* 0188 */ float m_pixelsPerUnit;
     /* 018C */ TEXTURECACHE m_textureCache[8];
     /* 024C */ uint32_t m_pixelSize;
+    uint32_t m_nominalSize;
 
     CGxFont();
     ~CGxFont();
@@ -49,6 +63,8 @@ struct CGxFont : public TSLinkedNode<CGxFont> {
     bool GetGlyphData(GLYPHBITMAPDATA* data, uint32_t code);
     const char* GetName();
     uint32_t GetPixelSize();
+    uint32_t GetLayoutPixelSize();
+    bool UsesMsdf() const;
     void HandleScreenSizeChange();
     int32_t Initialize(const char* name, uint32_t fontFlags, float fontHeight);
     CHARCODEDESC* NewCodeDesc(uint32_t code);

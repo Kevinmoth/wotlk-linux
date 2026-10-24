@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.24)
 
 if (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
     message(FATAL_ERROR
@@ -10,11 +10,66 @@ endif ()
 
 project(wowdecomp CXX C)
 
+if (ANDROID)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif ()
+
+if (MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    add_compile_options(/utf-8)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+        add_compile_options(/Zc:preprocessor)
+    endif ()
+endif ()
+
+# ʕ •ᴥ•ʔ✿ Storm offsetof, FourCC literals, and vendored register are intentional. Clang C++17 rejects register ✿ ʕ •ᴥ•ʔ
+if (NOT MSVC)
+    add_compile_options(-Wno-invalid-offsetof -Wno-register -Wno-multichar)
+endif ()
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-Wno-c++11-narrowing)
+endif ()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if (NOT CMAKE_SYSTEM_NAME MATCHES "Windows")
-    message(FATAL_ERROR "wowdecomp targets Windows only.")
+include(${CMAKE_SOURCE_DIR}/cmake/Platform.cmake)
+
+if (NOT WIN32 AND NOT WOWDECOMP_UNIX)
+    message(FATAL_ERROR "wowdecomp targets Windows, Linux, Android, and macOS (experimental).")
+endif ()
+
+# ʕ •ᴥ•ʔ✿ Vulkan is the primary backend on every platform; D3D9 remains as the selectable gxApi fallback on Windows ✿ ʕ •ᴥ•ʔ
+option(WOWDECOMP_ENABLE_VULKAN "Build the Vulkan Gx backend (MoltenVK on macOS)" ON)
+
+if (WOWDECOMP_ENABLE_VULKAN)
+    add_compile_definitions(WOWDECOMP_VULKAN=1)
+    if (WOWDECOMP_APPLE)
+        add_compile_definitions(WOWDECOMP_VULKAN_MOLTENVK=1)
+    endif ()
+endif ()
+
+if (WOWDECOMP_ANDROID)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+    include(${CMAKE_SOURCE_DIR}/cmake/AndroidDeps.cmake)
+elseif (WOWDECOMP_UNIX)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+    if (WOWDECOMP_LINUX)
+        find_package(SDL3 REQUIRED)
+    else ()
+        find_package(SDL2 REQUIRED)
+    endif ()
+endif ()
+
+if (WOWDECOMP_APPLE)
+    find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
+    find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
 endif ()
 
 # x64 is the target. Win32 stays buildable: it is the configuration whose struct layouts can be
@@ -35,17 +90,39 @@ else ()
     message(FATAL_ERROR "Unsupported pointer size.")
 endif ()
 
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# ʕ •ᴥ•ʔ✿ Gradle packages shared libraries from CMake's default output dirs ✿ ʕ •ᴥ•ʔ
+if (NOT ANDROID)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif ()
 
-add_compile_definitions(
-    WIN32
-    _WINDOWS
-    NOMINMAX
-    WIN32_LEAN_AND_MEAN
-    _CRT_SECURE_NO_WARNINGS
-)
+if (WIN32)
+    add_compile_definitions(
+        WIN32
+        _WINDOWS
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _CRT_SECURE_NO_WARNINGS
+    )
+else ()
+    add_compile_definitions(
+        WOWDECOMP_UNIX=1
+        __stdcall=
+        __cdecl=
+        __fastcall=
+        __thiscall=
+        "__int64=long long"
+        _alloca=__builtin_alloca
+    )
+    if (WOWDECOMP_APPLE)
+        add_compile_definitions(WOWDECOMP_APPLE=1)
+    elseif (WOWDECOMP_ANDROID)
+        add_compile_definitions(WOWDECOMP_ANDROID=1)
+    else ()
+        add_compile_definitions(WOWDECOMP_LINUX=1)
+    endif ()
+endif ()
 
 # Off by default: the client checks MPQ file MD5s (signaturefile) and GlueXML/FrameXML/AddOn .toc.sig files like the
 # original. ON accepts unsigned or modified game data and interface files.
@@ -54,15 +131,12 @@ if (WOWDECOMP_DISABLE_SIGNATURE_CHECKS)
     add_compile_definitions(DISABLE_SIGNATURE_CHECKS=1)
 endif ()
 
-# Game identity (build 12340, version 3.3.5, client name) lives in GameVersion.h at the repository root.
-# WaystoneVersion.h is regenerated from git on every build; the login screen shows its build number.
-set(WAYSTONE_VERSION_HEADER ${CMAKE_BINARY_DIR}/generated/WaystoneVersion.h)
-add_custom_target(WaystoneVersion
-    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DOUTPUT=${WAYSTONE_VERSION_HEADER} -P ${CMAKE_SOURCE_DIR}/cmake/GenerateWaystoneVersion.cmake
-    BYPRODUCTS ${WAYSTONE_VERSION_HEADER}
-    VERBATIM
-)
-include_directories(${CMAKE_BINARY_DIR}/generated)
+# Off by default: item metadata is loaded from and saved to the original WDB cache files. ON keeps item metadata
+# session-only so every item absent from memory is queried from the server.
+option(WOWDECOMP_DISABLE_ITEM_CACHE "Ignore persisted item metadata and use server item query responses" OFF)
+if (WOWDECOMP_DISABLE_ITEM_CACHE)
+    add_compile_definitions(DISABLE_ITEM_CACHE=1)
+endif ()
 
 # Third-party code is linked, not decompiled, for now.
 if (EXISTS ${CMAKE_SOURCE_DIR}/ThirdParty/CMakeLists.txt)
@@ -79,6 +153,7 @@ add_subdirectory(Engine/Source/FFX)
 add_subdirectory(Engine/Source/Frame)
 add_subdirectory(Engine/Source/FrameScript)
 add_subdirectory(Engine/Source/FrameXML)
+add_subdirectory(Engine/Source/WasmAddon)
 add_subdirectory(Engine/Source/Gx)
 add_subdirectory(Engine/Source/Gxu)
 add_subdirectory(Engine/Source/Images)
@@ -86,6 +161,7 @@ add_subdirectory(Engine/Source/jpeg)
 add_subdirectory(Engine/Source/lua-5.1)
 add_subdirectory(Engine/Source/Model2)
 add_subdirectory(Engine/Source/Os)
+add_subdirectory(Engine/Source/Perf)
 add_subdirectory(Engine/Source/pcre)
 add_subdirectory(Engine/Source/Scrn)
 add_subdirectory(Engine/Source/Services)
@@ -115,18 +191,19 @@ add_subdirectory(WoW/Source/WorldClient)
 add_subdirectory(WoW/Source/WowServices)
 add_subdirectory(WoW/Source/WowSvcs)
 add_subdirectory(WoW/Source)
-if (WIN32)
-    add_subdirectory(Tools/WowClient)
+enable_testing()
+add_subdirectory(Tools/WowClient)
+if (NOT WOWDECOMP_ANDROID)
+    add_subdirectory(Tools/WasmAddonHost)
 endif ()
-if (WOWDECOMP_ARCH_64)
+if (WIN32 AND WOWDECOMP_ARCH_64)
     add_subdirectory(Tools/XvidDecoder)
 endif ()
 
-add_dependencies(Glue WaystoneVersion)
-add_dependencies(Ui WaystoneVersion)
-
-foreach (target Wow WowClient MapViewer M2Viewer GxTest MpqTest BlpTest DbcTest AssetCheck)
-    if (TARGET ${target})
-        target_sources(${target} PRIVATE ${CMAKE_SOURCE_DIR}/waystone.rc)
-    endif ()
-endforeach ()
+if (WIN32)
+    foreach (target Wow WowClient MapViewer M2Viewer GxTest MpqTest BlpTest DbcTest AssetCheck)
+        if (TARGET ${target})
+            target_sources(${target} PRIVATE ${CMAKE_SOURCE_DIR}/waystone.rc)
+        endif ()
+    endforeach ()
+endif ()

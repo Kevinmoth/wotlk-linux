@@ -1,7 +1,10 @@
 #include "WorldParam.h"
+#include "WorldParam_CVarSlider.h"
+#include <cstdint>
 #include <cstdio>
 #include <new>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+#include "Engine/Source/Gx/WowDecompVk.h"
 #include "Engine/Source/Services/GfxSingletonManager.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/ShaderEffect/ShaderEffect.h"
@@ -87,6 +90,12 @@ CVar* CWorldParam::cvar_terrainAlphaBitDepth;
 
 // STATIC: 0x00CD85C8
 CVar* CWorldParam::cvar_farClipOverride;
+
+CVar* CWorldParam::cvar_extendedView;
+
+CVar* CWorldParam::cvar_extendedHorizonZClip;
+
+CVar* CWorldParam::cvar_distanceFog;
 
 // STATIC: 0x00CD85CC
 CVar* CWorldParam::cvar_objectFade;
@@ -219,11 +228,15 @@ bool CWorldParam::NearClipCallback(CVar* var, const char* oldValue, const char* 
 // OFFSET: 0x0078D7C0
 bool CWorldParam::HorizonFarClipScaleCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
     float scale = SStrToFloat(value);
+    const float minScale = CWorldParamSlider::kHorizonFarclipScaleMin;
+    float maxScale = CWorldParamSlider::ExtendedHorizonZClipEnabled()
+        ? CWorldParamSlider::kHorizonFarclipScaleMaxExtended
+        : CWorldParamSlider::kHorizonFarclipScaleMaxRetail;
 
-    if (scale < 3.0f) {
-        scale = 3.0f;
-    } else if (scale > 6.0f) {
-        scale = 6.0f;
+    if (scale < minScale) {
+        scale = minScale;
+    } else if (scale > maxScale) {
+        scale = maxScale;
     }
 
     World::SetHorizonFarClipScale(scale);
@@ -376,10 +389,13 @@ bool CWorldParam::GroundEffectDensityCallback(CVar* var, const char* oldValue, c
 // OFFSET: 0x0078DB10
 bool CWorldParam::GroundEffectDistCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
     float dist = SStrToFloat(value);
+    const float maxDist = CWorldParamSlider::ExtendedViewEnabled()
+        ? CWorldParamSlider::kGroundEffectDistMaxExtended
+        : CWorldParamSlider::kGroundEffectDistMaxRetail;
 
-    if (dist < 0.0f || dist > 140.0f) {
+    if (dist < 0.0f || dist > maxDist) {
         char buffer[256];
-        sprintf(buffer, "Ground effect distance must be in range %0f to %0f.", 0.0, 140.0);
+        sprintf(buffer, "Ground effect distance must be in range %0f to %0f.", 0.0, maxDist);
         ConsoleWriteA(buffer, DEFAULT_COLOR);
 
         return false;
@@ -425,6 +441,92 @@ bool CWorldParam::FarClipOverrideCallback(CVar* var, const char* oldValue, const
         ConsoleWrite("farClipOverride must be 0 or 1.", DEFAULT_COLOR);
 
         return false;
+    }
+
+    if (CWorldParam::cvar_farClip) {
+        World::SetFarClip(CWorldParam::cvar_farClip->m_floatValue);
+    }
+
+    return true;
+}
+
+bool CWorldParam::ExtendedViewCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    if (SStrToInt(value) > 1) {
+        ConsoleWrite("extendedView must be 0 or 1.", DEFAULT_COLOR);
+
+        return false;
+    }
+
+    const bool full = SStrToInt(value) != 0;
+
+    // ʕ •ᴥ•ʔ✿ The cvar stores the new value after this returns. Dependents read m_intValue now ✿ ʕ •ᴥ•ʔ
+    if (var) {
+        var->m_intValue = full ? 1 : 0;
+    }
+
+    if (CWorldParam::cvar_distanceFog) {
+        CWorldParam::cvar_distanceFog->Set(full ? "0" : "1", true, true, false, true);
+    }
+
+    if (CWorldParam::cvar_extendedHorizonZClip) {
+        CWorldParam::cvar_extendedHorizonZClip->Set(full ? "1" : "0", true, true, false, true);
+    }
+
+    if (CWorldParam::cvar_horizonFarClip) {
+        CWorldParam::cvar_horizonFarClip->Set(full ? "48" : "4", true, true, false, true);
+    }
+
+    if (full) {
+        CWorld::enables |= Enable_LowDetail;
+    } else {
+        CWorld::enables &= ~Enable_LowDetail;
+    }
+
+    if (CWorldParam::cvar_farClip) {
+        float farClip = CWorldParam::cvar_farClip->m_floatValue;
+
+        if (!full && farClip > CWorldParamSlider::kFarclipMaxRetail) {
+            farClip = CWorldParamSlider::kFarclipMaxRetail;
+        }
+
+        World::SetFarClip(farClip);
+    }
+
+    return true;
+}
+
+bool CWorldParam::ExtendedHorizonZClipCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    if (SStrToInt(value) > 1) {
+        ConsoleWrite("extendedHorizonZClip must be 0 or 1.", DEFAULT_COLOR);
+
+        return false;
+    }
+
+    if (var) {
+        var->m_intValue = SStrToInt(value) != 0;
+    }
+
+    if (CWorldParam::cvar_horizonFarClip) {
+        CWorldParam::HorizonFarClipScaleCallback(
+            CWorldParam::cvar_horizonFarClip,
+            nullptr,
+            CWorldParam::cvar_horizonFarClip->m_stringValue.m_str,
+            nullptr);
+    }
+
+    return true;
+}
+
+bool CWorldParam::DistanceFogCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    if (SStrToInt(value) > 1) {
+        ConsoleWrite("distanceFog must be 0 or 1.", DEFAULT_COLOR);
+
+        return false;
+    }
+
+    // ʕ •ᴥ•ʔ✿ The callback runs before the cvar stores the new value ✿ ʕ •ᴥ•ʔ
+    if (g_theGxDevicePtr) {
+        g_theGxDevicePtr->MasterEnableSet(GxMasterEnable_Fog, SStrToInt(value) ? 1 : 0);
     }
 
     return true;
@@ -619,10 +721,48 @@ bool CWorldParam::GxTextureCacheSizeCallback(CVar* var, const char* oldValue, co
     return true;
 }
 
+static bool VkExperimentCallback(CVar*, const char*, const char* value, void* arg) {
+    if (SStrToInt(value) > 1) {
+        ConsoleWrite("Vulkan experiment cvars must be 0 or 1.", DEFAULT_COLOR);
+        return false;
+    }
+
+    int32_t enabled = SStrToInt(value) != 0;
+
+    switch (reinterpret_cast<uintptr_t>(arg)) {
+        case 1:
+            WowDecompVk_SetUnlit(enabled);
+            break;
+        case 2:
+            WowDecompVk_SetFxaa(enabled);
+            break;
+        default:
+            WowDecompVk_SetWireframe(enabled);
+            break;
+    }
+
+    return true;
+}
+
+static bool VkSharpenCallback(CVar*, const char*, const char* value, void*) {
+    int32_t amount = SStrToInt(value);
+
+    if (amount < 0 || amount > 4) {
+        ConsoleWrite("vkSharpen must be 0-4.", DEFAULT_COLOR);
+        return false;
+    }
+
+    WowDecompVk_SetSharpen(amount);
+    return true;
+}
+
 // VERIFY: 9acf82a1 auto
 // OFFSET: 0x0078E400
 void CWorldParam::Initialize() {
     CWorldParam::cvar_farClipOverride = CVar::Register("farClipOverride", "Override old world graphic settings", 1, "0", CWorldParam::FarClipOverrideCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_extendedView = CVar::Register("extendedView", "Unlock extended view distance for playtest", 1, "0", CWorldParam::ExtendedViewCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_extendedHorizonZClip = CVar::Register("extendedHorizonZClip", "Unlock extended horizon Z clip for map-wide view", 1, "0", CWorldParam::ExtendedHorizonZClipCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_distanceFog = CVar::Register("distanceFog", "Enable world distance fog", 1, "1", CWorldParam::DistanceFogCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_lod = CVar::Register("lod", "Video option: Toggle Lod", 1, "0", CWorldParam::LodCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_mapShadows = CVar::Register("mapShadows", "Video option: Toggle map shadows", 1, "1", CWorldParam::MapShadowsCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_maxLights = CVar::Register("MaxLights", "Max number of hardware lights", 1, "4", CWorldParam::MaxLightsCallback, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -653,6 +793,10 @@ void CWorldParam::Initialize() {
     CWorldParam::cvar_projectedTextures = CVar::Register("projectedTextures", "Projected Textures", 1, "0", CWorldParam::ProjectedTexturesCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_gxTextureCacheSize = CVar::Register("gxTextureCacheSize", "GX Texture Cache Size", 1, "0", CWorldParam::GxTextureCacheSizeCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CVar::Register("spellEffectLevel", "Video Option: Spell Effects", 1, "9", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("vkWireframe", "Vulkan experiment: wireframe world geometry", 1, "0", VkExperimentCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("vkUnlit", "Vulkan experiment: disable fixed-function lighting", 1, "0", VkExperimentCallback, CATEGORY_GRAPHICS, false, reinterpret_cast<void*>(1), false);
+    CVar::Register("vkFxaa", "Vulkan experiment: fullscreen anti-aliasing", 1, "0", VkExperimentCallback, CATEGORY_GRAPHICS, false, reinterpret_cast<void*>(2), false);
+    CVar::Register("vkSharpen", "Vulkan experiment: sharpen the resolved image", 1, "0", VkSharpenCallback, CATEGORY_GRAPHICS, false, nullptr, false);
 
     AddConsoleDeviceDefaultCallback(CWorldParam::SetDefaults);
 
@@ -667,5 +811,11 @@ void CWorldParam::Initialize() {
     if (!videoOptionsVersion || videoOptionsVersion->m_intValue < 2) {
         CWorldParam::SetDefaultParticleDensity();
         CWorldParam::SetDefaultProjectedTextures();
+    }
+
+    CWorldParamSlider::ApplyDistanceFogFromCVar();
+
+    if (CWorldParam::cvar_extendedView && CWorldParam::cvar_extendedView->m_intValue) {
+        CWorldParam::ExtendedViewCallback(CWorldParam::cvar_extendedView, nullptr, "1", nullptr);
     }
 }

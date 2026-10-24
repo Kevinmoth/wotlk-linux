@@ -34,6 +34,7 @@
 #include "Engine/Source/Os/System.h"
 #include "Engine/Source/Os/Time.h"
 #include "Engine/Source/Os/TimeManager.h"
+#include "Engine/Source/Perf/PerfLog.h"
 #include "Engine/Source/Scrn/Scrn.h"
 #include "Engine/Source/Services/AsyncFile.h"
 #include "Engine/Source/Services/ModelBlob.h"
@@ -111,8 +112,9 @@
 #include "WoW/Source/WowSvcs/WowSvcsClient/AccountData.h"
 #include "WoW/Source/WowSvcs/WowSvcsClient/ClientServices.h"
 #include "WoW/Source/WowSvcs/WowSvcsClient/FriendList.h"
+#include "WoW/Source/Ui/WasmConfirmOverlay.h"
 #include "WoW/Source/WowSysMessageOutput.h"
-#include "GameVersion.h"
+#include "WoW/Source/WasmAddonClient.h"
 
 namespace {
 
@@ -146,6 +148,7 @@ static const _ARGLIST s_wowArgList[] = {
     { 0, CMD_WINDOWED, "windowed", nullptr },
     { 0, CMD_HW_DETECT, "hwdetect", nullptr },
     { 0, CMD_CONSOLE, "console", nullptr },
+    { 0, CMD_CONSOLE_LOG, "consolelog", nullptr },
     { 0x20000, CMD_GX_OVERRIDE, "gxoverride", nullptr },
 };
 
@@ -265,7 +268,7 @@ static uint32_t s_unk_B2FA10;
 static char s_installLocation[1024];
 
 // STATIC: 0x00C5DE90
-bool g_hasIsoLocale[NUM_DB_LOCALES];
+bool g_hasIsoLocale[12];
 
 // STATIC: 0x00C5DE9C
 int32_t s_locale;
@@ -525,9 +528,11 @@ static void WowClientDestroy() {
     ComSatClient_Shutdown();
     ObjectEffectSystem_ShutDown();
     SI2::ShutDown(0);
+    WasmAddonClient_Shutdown();
     FrameScript_Destroy();
     g_soundCache.Clear();
     LoadingScreenShutdown();
+    WasmConfirmOverlay_Shutdown();
     WowSysMessageOutput::Shutdown();
     ConsoleCommandUnregister("reloadUI");
     ConsoleCommandUnregister("perf");
@@ -655,7 +660,7 @@ static void CheckAvailableLocales(char* locale) {
         return;
     }
 
-    for (int32_t i = 0; i < NUM_DB_LOCALES; i++) {
+    for (int32_t i = 0; i < 12; i++) {
         char path[1024];
         g_hasIsoLocale[i] = false;
 
@@ -669,8 +674,8 @@ static void CheckAvailableLocales(char* locale) {
 
     int32_t index = LocaleNameToIndex(locale);
 
-    for (int32_t i = 0; i < NUM_DB_LOCALES && !g_hasIsoLocale[index]; i++) {
-        index = (index + 1) % NUM_DB_LOCALES;
+    for (int32_t i = 0; i < 12 && !g_hasIsoLocale[index]; i++) {
+        index = (index + 1) % 12;
     }
 
     SStrCopy(locale, g_localeNames[index], STORM_MAX_STR);
@@ -867,7 +872,7 @@ static void LoadMFIL(const char* file) {
         InitOggDecompression();
     }
 
-    SFile::SetStreamingStatus(s_streamingDiag & 1, (s_streamingDiag >> 1) & 1, (s_streamingDiag >> 2) & 1, (s_streamingDiag >> 3) & 1, GAME_BUILD);
+    SFile::SetStreamingStatus(s_streamingDiag & 1, (s_streamingDiag >> 1) & 1, (s_streamingDiag >> 2) & 1, (s_streamingDiag >> 3) & 1, 12340);
 }
 
 // VERIFY: 4b6c1aaa auto
@@ -882,7 +887,7 @@ void StartupReport(bool firstRun) {
     Blizzard::Streaming::FileManifest::SetSpeedTest(speedTest);
     StartupReportSetSpeedTest(speedTest);
     Tracker::SetLocale(CVar::Lookup("locale")->m_stringValue.m_str);
-    Tracker::SetBuildnum(GAME_BUILD);
+    Tracker::SetBuildnum(12340);
     StartupReportSendTelemetry(true, firstRun);
     World::SetFrameCntCallback(StartupReportFrameCallback);
 }
@@ -1008,10 +1013,12 @@ static void InitializeClient() {
     EventRegister(EVENT_ID_UPDATE, EnableCallback);
     SysMsgInitialize();
     WowSysMessageOutput::Initialize();
+    WasmConfirmOverlay_Initialize();
     ClientRegisterConsoleCommands();
     ClientDBInitialize();
     LoadingScreenInitialize();
     FrameScript_Initialize(0);
+    WasmAddonClient_Initialize();
     SI2::Init(0);
     ObjectEffectSystem_Initialize();
     FrameXML_RegisterDefault();
@@ -1072,6 +1079,7 @@ static void InitializeClient() {
 int32_t InitializeEngineCallback(const void* data, void* param) {
     BaseInitializeContext();
     HeapUsageInitialize();
+    PerfLogInit();
     AsyncFileReadRegisterCVars();
     TextureInitialize();
     ModelBlobLoad("world\\model.blob");
@@ -1166,47 +1174,47 @@ static void LogZoneInfo(CGObject_C* object, char* buffer, uint32_t size) {
 // VERIFY: 4c651ee9 manual
 // OFFSET: 0x00404B80
 int32_t STORMAPI WowLogHeader(char* buffer, uint32_t bufferchars) {
-    SStrPrintf(buffer, bufferchars, "WoWBuild: %d\r\n", GAME_BUILD);
+    SStrPrintf(buffer, bufferchars, "WoWBuild: %d\r\n", 12340);
 
     if (ClntObjMgrIsValid(0)) {
-        CGObject_C* player = ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__);
+        CGObject_C* player = ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__);
 
         if (player && SMemIsValidPointer(player, sizeof(CGPlayer_C), 0)) {
             LogRealmInfo(buffer, bufferchars);
             LogZoneInfo(player, buffer, bufferchars);
             LogObjectInfo(player, "Local Player", buffer, bufferchars);
 
-            CGObject_C* object = ClntObjMgrObjectPtr(static_cast<CGPlayer_C*>(player)->m_combat.m_attacking, TYPE_OBJECT, __FILE__, __LINE__);
+            CGObject_C* object = ClntObjMgrObjectPtr(static_cast<CGPlayer_C*>(player)->m_combat.m_attacking, TYPEMASK_OBJECT, __FILE__, __LINE__);
 
             if (object) {
                 LogObjectInfo(object, "Attacking Target", buffer, bufferchars);
             }
 
-            object = ClntObjMgrObjectPtr(CGGameUI::m_currentObjectTrack, TYPE_OBJECT, __FILE__, __LINE__);
+            object = ClntObjMgrObjectPtr(CGGameUI::m_currentObjectTrack, TYPEMASK_OBJECT, __FILE__, __LINE__);
 
             if (object) {
                 LogObjectInfo(object, "Current Object Track", buffer, bufferchars);
             }
 
-            object = ClntObjMgrObjectPtr(CGGameUI::m_interactTarget, TYPE_OBJECT, __FILE__, __LINE__);
+            object = ClntObjMgrObjectPtr(CGGameUI::m_interactTarget, TYPEMASK_OBJECT, __FILE__, __LINE__);
 
             if (object) {
                 LogObjectInfo(object, "Interact Target", buffer, bufferchars);
             }
 
-            object = ClntObjMgrObjectPtr(CGGameUI::m_lockedTarget, TYPE_OBJECT, __FILE__, __LINE__);
+            object = ClntObjMgrObjectPtr(CGGameUI::m_lockedTarget, TYPEMASK_OBJECT, __FILE__, __LINE__);
 
             if (object) {
                 LogObjectInfo(object, "Locked Target", buffer, bufferchars);
             }
 
-            object = ClntObjMgrObjectPtr(CGGameUI::m_lastEnemyTarget, TYPE_OBJECT, __FILE__, __LINE__);
+            object = ClntObjMgrObjectPtr(CGGameUI::m_lastEnemyTarget, TYPEMASK_OBJECT, __FILE__, __LINE__);
 
             if (object) {
                 LogObjectInfo(object, "Last Enemy Target", buffer, bufferchars);
             }
 
-            object = ClntObjMgrObjectPtr(CGGameUI::GetCursorItem(), TYPE_ITEM, __FILE__, __LINE__);
+            object = ClntObjMgrObjectPtr(CGGameUI::GetCursorItem(), TYPEMASK_ITEM, __FILE__, __LINE__);
 
             if (object) {
                 LogObjectInfo(object, "Cursor Item", buffer, bufferchars);
@@ -1447,7 +1455,7 @@ static void OpenArchives() {
 
                 char title[256];
                 SStrCopy(title, "Missing or corrupted data", STORM_MAX_STR);
-                OsGuiMessageBox(OsGuiGetWindow(OSGUI_WINDOW_TYPE_FRONT), OSGUI_MESSAGE_STYLE_OK, message, title);
+                OsGuiMessageBox(OsGuiGetWindow(2), 0, message, title);
                 StormExit(SErrGetLastError());
             }
         }
@@ -1533,6 +1541,19 @@ static void OpenArchives() {
     ProfileClose(profile);
     ClientServices::InitLoginServerCVars(1, locale);
     LoadMopaqFileSigningData(locale);
+
+#if defined(__ANDROID__)
+    static const char* androidPrefetch[] = {
+        "Fonts\\FRIZQT__.TTF",
+        "Fonts\\MORPHEUS.TTF",
+        "Fonts\\skurri.ttf",
+        "Fonts\\blei00d.ttf",
+    };
+
+    for (uint32_t i = 0; i < sizeof(androidPrefetch) / sizeof(androidPrefetch[0]); i++) {
+        SFile::MakeFileLocal(androidPrefetch[i], 64, true);
+    }
+#endif
 }
 // VERIFY: 18427c91 manual
 // OFFSET: 0x004064A0
@@ -1643,6 +1664,7 @@ int32_t DestroyEngineCallback(const void* data, void* param) {
     TextureDestroy();
     AsyncFileReadDestroy();
     GxuLightShutdown();
+    PerfLogDestroy();
     HeapUsageDestroy();
     ObjectAllocDestroy();
     BaseDestroyContext();
@@ -1672,8 +1694,7 @@ void ForEveryRunOnceWTF::Execute(int32_t (*callback)(const char*)) {
 // VERIFY: f4d6d325 manual
 // OFFSET: 0x004067F0
 bool InitializeGlobal() {
-    SCmdRegisterArgList(s_wowArgList, sizeof(s_wowArgList) / sizeof(s_wowArgList[0]));
-    CmdLineProcess();
+    ConsoleSetLogTee(CmdLineGetBool(static_cast<CMDOPT>(CMD_CONSOLE_LOG)));
     LoadMFIL("WoW.mfil");
 
     if (s_unk_B2FA10 != 2) {
@@ -1758,7 +1779,16 @@ bool InitializeGlobal() {
 
     g_startup_StringsDB.Load(__FILE__, __LINE__);
 
-    ConsoleDeviceInitialize(CLIENT_NAME, 1, 1);
+    Startup_StringsRec* title = g_startup_StringsDB.GetRecord(1);
+    char windowTitle[260];
+    const char* benchTitle = std::getenv("WOWDECOMP_WINDOW_TITLE");
+
+    if (benchTitle && benchTitle[0]) {
+        SStrCopy(windowTitle, benchTitle, STORM_MAX_STR);
+    } else {
+        SStrCopy(windowTitle, title ? title->m_message : "World of Warcraft", STORM_MAX_STR);
+    }
+    ConsoleDeviceInitialize(windowTitle, 1, 1);
 
     OsIMEInitialize();
     g_rndSeed.SetSeed(OsGetAsyncTimeMs());
@@ -1791,8 +1821,10 @@ void BeginCloseGame() {
     if (s_closeErrorStringId) {
         Startup_StringsRec* title = g_startup_StringsDB.GetRecord(1);
         Startup_StringsRec* message = g_startup_StringsDB.GetRecord(s_closeErrorStringId);
-        OsGuiMessageBox(nullptr, OSGUI_MESSAGE_STYLE_OK, message ? message->m_message : "Unknown Error", title ? title->m_message : "World of Warcraft");
+        OsGuiMessageBox(nullptr, 0, message ? message->m_message : "Unknown Error", title ? title->m_message : "World of Warcraft");
     }
+
+    OsInputQuitDeferredEvents();
 }
 
 // VERIFY: cfa3efeb auto
@@ -1808,7 +1840,24 @@ int32_t CommonMain() {
     StormSetOption(11, &option, sizeof(option));
 
     OsSystemEnableCpuLog();
+    // ʕ •ᴥ•ʔ✿ -datadir has to land before the exe directory becomes the data root ✿ ʕ •ᴥ•ʔ
+    SCmdRegisterArgList(s_wowArgList, sizeof(s_wowArgList) / sizeof(s_wowArgList[0]));
+    CmdLineProcess();
     SetPaths();
+
+    {
+        const char* autoLogin = CmdLineGetString(CMD_AUTOLOGIN);
+
+        if (autoLogin && autoLogin[0]) {
+#if defined(_WIN32)
+            char env[192];
+            SStrPrintf(env, sizeof(env), "WOWDECOMP_AUTOLOGIN=%s", autoLogin);
+            _putenv(env);
+#else
+            setenv("WOWDECOMP_AUTOLOGIN", autoLogin, 1);
+#endif
+        }
+    }
 
     uint32_t sendErrorLogs = 1;
 
@@ -1817,7 +1866,7 @@ int32_t CommonMain() {
         SRegSaveValue("World of Warcraft\\Client", "SendErrorLogs", 0, 1);
     }
 
-    SErrSetLogTitleString("World of WarCraft (build " GAME_BUILD_STRING ")");
+    SErrSetLogTitleString("World of WarCraft (build 12340)");
     SErrSetLogCallback(WowLogHeader);
 
     if (sendErrorLogs) {
@@ -2010,7 +2059,7 @@ int32_t STORMAPI SendErrorLog(uint32_t errorcode, const char* description, const
 // VERIFY: b4bcd439 manual
 // OFFSET: 0x00404EE0
 static void ClientBeginTaxiBenchmarkMode() {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (!player || !(player->m_player->m_playerFlags & 0x20000)) {
         return;
@@ -2039,7 +2088,7 @@ static void ClientEndTaxiBenchmarkMode(int32_t silent) {
         return;
     }
 
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (!player || player->IsDeadOrGhost()) {
         return;
@@ -2058,7 +2107,7 @@ static void ClientEndTaxiBenchmarkMode(int32_t silent) {
 // VERIFY: 79999d66 manual
 // OFFSET: 0x00405130
 void ClientUpdateTaxiBenchmarkMode() {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         return;
@@ -2170,7 +2219,7 @@ int32_t Packet_SMSG_PLAYED_TIME(void* param, NETMESSAGE msgId, uint32_t time, CD
     WOWGUID guid = ClntObjMgrGetActivePlayer();
 
     if (guid) {
-        CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(guid, TYPE_PLAYER, __FILE__, __LINE__));
+        CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_PLAYER, __FILE__, __LINE__));
 
         if (player) {
             player->SetPlayedTime(total);

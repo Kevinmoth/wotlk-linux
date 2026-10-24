@@ -2,6 +2,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <malloc.h>
+#include <string>
+#include <unordered_map>
 #include "Engine/Source/Base/CDataStore.h"
 #include "Engine/Source/Base/Status.h"
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
@@ -10,6 +12,7 @@
 #include "Engine/Source/Os/OsFile.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/FrameXML/FrameXML.h"
+#include "Engine/Source/WasmAddon/WasmManifest.h"
 #include "Engine/Source/FrameXML/LoadXML.h"
 #include "Engine/Source/Storm/Source/MD5.h"
 #include "Engine/Source/lua-5.1/src/lua.h"
@@ -20,6 +23,17 @@
 #include "ThirdParty/zlib/zlib.h"
 #include "WoW/Source/Ui/Types.h"
 #include "WoW/Source/Ui/UIBindings.h"
+
+// ʕ •ᴥ•ʔ✿ Wasm packages keep the whole addon in Interface\WasmAddOns\<Name>. The loader reads that folder ✿ ʕ •ᴥ•ʔ
+static std::unordered_map<std::string, std::string> s_addonFileRoot;
+
+static void RebuildAddOnList();
+
+static void FormatAddonFile(char* out, size_t outLen, const char* name, const char* file) {
+    auto it = s_addonFileRoot.find(name);
+    const char* root = it == s_addonFileRoot.end() ? "Interface\\AddOns" : it->second.c_str();
+    SStrPrintf(out, outLen, "%s\\%s\\%s", root, name, file);
+}
 
 // STATIC: 0x00AD17B4
 static const char* s_addOnLoadableTokens[12] = { "LOADABLE", "MISSING", "DISABLED", "BANNED", "CORRUPT", "INSECURE", "DEMAND_LOADED", "INTERFACE_VERSION", "INCOMPATIBLE", "SECURE", "INSECURE", "BANNED" };
@@ -714,8 +728,10 @@ void SetAddOnInfoRequest(CDataStore* msg) {
         const char* name = addon->m_key.m_str;
         char toc[260];
         char bindings[260];
-        SStrPrintf(toc, sizeof(toc), "Interface\\AddOns\\%s\\%s.toc", name, name);
-        SStrPrintf(bindings, sizeof(bindings), "Interface\\AddOns\\%s\\Bindings.xml", name);
+        char tocFile[260];
+        SStrPrintf(tocFile, sizeof(tocFile), "%s.toc", name);
+        FormatAddonFile(toc, sizeof(toc), name, tocFile);
+        FormatAddonFile(bindings, sizeof(bindings), name, "Bindings.xml");
 
         int32_t result = FrameXML_CheckSignature(toc, bindings, addon->m_hasPublicKey ? addon->m_publicKey : nullptr, addon->m_digest);
 
@@ -760,15 +776,7 @@ void SetAddOnInfoRequest(CDataStore* msg) {
 
     DestroyBannedAddOns();
 
-    s_addOnInfo.SetCount(0);
-
-    for (UIADDON* addon = s_addons.m_fulllist.Head(); addon; addon = s_addons.m_fulllist.Next(addon)) {
-        if (!addon->m_blizzard) {
-            *s_addOnInfo.New() = addon->m_key.m_str;
-        }
-    }
-
-    qsort(s_addOnInfo.m_data, s_addOnInfo.Count(), sizeof(const char*), QSortAddOns);
+    RebuildAddOnList();
 }
 
 // VERIFY: 6c736269 manual
@@ -1048,13 +1056,17 @@ bool LoadAddOn(const char* name, bool demandLoad, CStatus* status) {
         MD5Init(&md5);
 
         char path[260];
-        SStrPrintf(path, sizeof(path), "Interface\\AddOns\\%s\\%s.toc", addonName, addonName);
-        lua_State* L = FrameScript_GetContext();
-        lua_createtable(L, 0, 0);
-        FrameXML_CreateFrames(path, addonName, &md5, &addonStatus);
-        lua_settop(L, -2);
+        char tocFile[260];
+        SStrPrintf(tocFile, sizeof(tocFile), "%s.toc", addonName);
+        FormatAddonFile(path, sizeof(path), addonName, tocFile);
+        if (SFile::FileExists(path)) {
+            lua_State* L = FrameScript_GetContext();
+            lua_createtable(L, 0, 0);
+            FrameXML_CreateFrames(path, addonName, &md5, &addonStatus);
+            lua_settop(L, -2);
+        }
 
-        SStrPrintf(path, sizeof(path), "Interface\\AddOns\\%s\\Bindings.xml", addonName);
+        FormatAddonFile(path, sizeof(path), addonName, "Bindings.xml");
 
         if (SFile::FileExistsEx(path, 1)) {
             CGUIBindings::s_bindings->Load(path, &md5, &addonStatus);
@@ -1108,6 +1120,16 @@ bool LoadAddOn(const char* name, bool demandLoad, CStatus* status) {
     return true;
 }
 
+bool ReloadAddOn(const char* name, CStatus* status) {
+    UIADDON* addon = s_addons.Ptr(name);
+    if (!addon) return false;
+    const char* character = ClientServices::GetCharacterName();
+    if (!GetAddOnEnableState(addon->m_key.m_str, character, true)) return false;
+    addon->m_loading = false;
+    addon->m_loaded = false;
+    return LoadAddOn(addon->m_key.m_str, true, status);
+}
+
 // VERIFY: 96a89a20 auto
 // OFFSET: 0x005F84A0
 void LoadAddOns(CStatus* status) {
@@ -1133,7 +1155,9 @@ static void LoadAddOnInfo(const char* name) {
     }
 
     char path[260];
-    SStrPrintf(path, sizeof(path), "Interface\\AddOns\\%s\\%s.toc", name, name);
+    char tocFile[260];
+    SStrPrintf(tocFile, sizeof(tocFile), "%s.toc", name);
+    FormatAddonFile(path, sizeof(path), name, tocFile);
 
     void* data;
 
@@ -1401,11 +1425,214 @@ static int32_t EnumAddOnsDisk(OS_FILE_DATA& data, void* param) {
     return 0;
 }
 
+static bool TomlLine(const char* line, const char* key, const char** value) {
+    while (*line == ' ' || *line == '\t') line++;
+    size_t keyLen = strlen(key);
+    if (strncmp(line, key, keyLen) != 0) return false;
+    line += keyLen;
+    while (*line == ' ' || *line == '\t') line++;
+    if (*line != '=') return false;
+    line++;
+    while (*line == ' ' || *line == '\t') line++;
+    *value = line;
+    return true;
+}
+
+static void TomlQuoted(const char* text, const char* key, char* out, size_t outLen) {
+    out[0] = '\0';
+    const char* cursor = text;
+    while (*cursor) {
+        const char* value = nullptr;
+        if (TomlLine(cursor, key, &value)) {
+            if (*value != '"') return;
+            value++;
+            const char* end = strchr(value, '"');
+            if (!end || (size_t)(end - value) >= outLen) return;
+            memcpy(out, value, (size_t)(end - value));
+            out[end - value] = '\0';
+            return;
+        }
+        while (*cursor && *cursor != '\n') cursor++;
+        if (*cursor == '\n') cursor++;
+    }
+}
+
+static void TomlTrueKeys(const char* text, const char* section, char* out, size_t outLen) {
+    out[0] = '\0';
+    bool inside = false;
+    size_t sectionLen = strlen(section);
+    const char* cursor = text;
+    while (*cursor) {
+        const char* line = cursor;
+        while (*line == ' ' || *line == '\t') line++;
+        if (*line == '[') {
+            inside = strncmp(line, section, sectionLen) == 0 && line[sectionLen] == ']';
+        } else if (inside && *line && *line != '#' && *line != '\r' && *line != '\n') {
+            const char* eq = strchr(line, '=');
+            const char* eol = strchr(line, '\n');
+            if (eq && (!eol || eq < eol)) {
+                const char* keyEnd = eq;
+                while (keyEnd > line && (keyEnd[-1] == ' ' || keyEnd[-1] == '\t')) keyEnd--;
+                const char* val = eq + 1;
+                while (*val == ' ' || *val == '\t') val++;
+                if (strncmp(val, "true", 4) == 0 && (val[4] == '\0' || val[4] == ' ' || val[4] == '\t' || val[4] == '\r' || val[4] == '\n' || val[4] == '#')) {
+                    size_t used = strlen(out);
+                    size_t keyLen = (size_t)(keyEnd - line);
+                    size_t need = keyLen + (used ? 2 : 0);
+                    if (used + need + 1 < outLen) {
+                        if (used) {
+                            out[used++] = ',';
+                            out[used++] = ' ';
+                        }
+                        memcpy(out + used, line, keyLen);
+                        out[used + keyLen] = '\0';
+                    }
+                }
+            }
+        }
+        while (*cursor && *cursor != '\n') cursor++;
+        if (*cursor == '\n') cursor++;
+    }
+}
+
+// ʕ •ᴥ•ʔ✿ Notes are the addon-list description. Color codes and |n render in the tooltip and the side panel. ✿ ʕ •ᴥ•ʔ
+static void ApplyWasmDescription(UIADDON* addon, const char* text) {
+    char id[128];
+    char displayName[256];
+    char author[128];
+    char version[64];
+    char api[32];
+    char perms[512];
+    TomlQuoted(text, "id", id, sizeof(id));
+    TomlQuoted(text, "name", displayName, sizeof(displayName));
+    TomlQuoted(text, "author", author, sizeof(author));
+    TomlQuoted(text, "version", version, sizeof(version));
+    TomlQuoted(text, "api_version", api, sizeof(api));
+    TomlTrueKeys(text, "[permissions", perms, sizeof(perms));
+
+    UIADDON::METADATA* title = addon->m_metadata.Ptr("Title");
+    if (displayName[0] && (!title || !title->m_value || !SStrCmpI(title->m_value, addon->m_key.m_str, STORM_MAX_STR))) {
+        addon->SetMetadata("Title", displayName);
+    }
+    bool hadVersion = addon->m_metadata.Ptr("Version") != nullptr;
+    bool hadAuthor = addon->m_metadata.Ptr("Author") != nullptr;
+    if (version[0] && !hadVersion) addon->SetMetadata("Version", version);
+    if (author[0] && !hadAuthor) addon->SetMetadata("Author", author);
+
+    char notes[1024];
+    notes[0] = '\0';
+    UIADDON::METADATA* existing = addon->m_metadata.Ptr("Notes");
+    if (existing && existing->m_value && existing->m_value[0] && !strstr(existing->m_value, "WASM addon")) {
+        SStrCopy(notes, existing->m_value, sizeof(notes));
+    }
+
+    auto line = [&](const char* text) {
+        size_t len = strlen(notes);
+        if (len && len + 2 < sizeof(notes)) {
+            notes[len++] = '|';
+            notes[len++] = 'n';
+            notes[len] = '\0';
+        }
+        SStrCopy(notes + strlen(notes), text, sizeof(notes) - strlen(notes));
+    };
+    auto row = [&](const char* label, const char* value) {
+        if (!value || !value[0]) return;
+        char text[384];
+        SStrPrintf(text, sizeof(text), "|cffd4c4a8%s|r  |cffffffff%s|r", label, value);
+        line(text);
+    };
+
+    line("|cff8ec8ffWASM addon|r");
+    row("Id", id);
+    if (!hadVersion) row("Version", version);
+    row("API", api);
+    if (!hadAuthor) row("Author", author);
+    if (perms[0]) {
+        line("|cffd4c4a8Permissions|r");
+        const char* cursor = perms;
+        while (*cursor) {
+            while (*cursor == ' ') cursor++;
+            const char* comma = strchr(cursor, ',');
+            char name[96];
+            size_t nameLen = comma ? (size_t)(comma - cursor) : strlen(cursor);
+            if (nameLen >= sizeof(name)) nameLen = sizeof(name) - 1;
+            memcpy(name, cursor, nameLen);
+            name[nameLen] = '\0';
+            while (nameLen && name[nameLen - 1] == ' ') name[--nameLen] = '\0';
+            WasmAddon::Permission perm = WasmAddon::PermNone;
+            bool sensitive = WasmAddon::PermissionFromName(name, perm) && WasmAddon::IsSensitive(perm);
+            char text[160];
+            SStrPrintf(text, sizeof(text), sensitive ? "|cffffb04a  %s|r" : "|cff9dff9d  %s|r", name);
+            line(text);
+            if (!comma) break;
+            cursor = comma + 1;
+        }
+    }
+    addon->SetMetadata("Notes", notes);
+}
+
+static bool ReadWasmToml(const char* name, std::string& text) {
+    char path[260];
+    SStrPrintf(path, sizeof(path), "Interface\\WasmAddOns\\%s\\addon.toml", name);
+    void* data = nullptr;
+    uint32_t size = 0;
+    if (!SFile::ReadFile(nullptr, path, &data, &size, 1, 1, nullptr) || !data || !size) return false;
+    text.assign(static_cast<const char*>(data), size);
+    SFile::Unload(data);
+    return true;
+}
+
+static void RegisterWasmPackage(const char* name) {
+    if (s_addons.Ptr(name)) return;
+    s_addonFileRoot[name] = "Interface\\WasmAddOns";
+    UIADDON* addon = s_addons.New(name, 0, 0);
+    addon->m_interfaceVersion = 30300;
+    addon->SetMetadata("Title", name);
+    addon->SetMetadata("Notes", "WASM addon.");
+    std::string text;
+    if (!ReadWasmToml(name, text)) return;
+    ApplyWasmDescription(addon, text.c_str());
+}
+
+static bool LooseFile(const char* path) {
+    if (OsFileExists(path)) return true;
+    char alt[260];
+    SStrCopy(alt, path, sizeof(alt));
+    for (char* p = alt; *p; p++) if (*p == '\\') *p = '/';
+    return OsFileExists(alt) != 0;
+}
+
+static void RebuildAddOnList() {
+    s_addOnInfo.SetCount(0);
+    for (UIADDON* addon = s_addons.m_fulllist.Head(); addon; addon = s_addons.m_fulllist.Next(addon)) {
+        if (!addon->m_blizzard) *s_addOnInfo.New() = addon->m_key.m_str;
+    }
+    qsort(s_addOnInfo.m_data, s_addOnInfo.Count(), sizeof(const char*), QSortAddOns);
+}
+
+static int32_t EnumWasmPackages(OS_FILE_DATA& data, void* param) {
+    if (!(data.flags & 0x10) || data.fileName[0] == '.') return 0;
+    char path[260];
+    SStrPrintf(path, sizeof(path), "Interface\\WasmAddOns\\%s\\%s.toc", data.fileName, data.fileName);
+    if (LooseFile(path)) {
+        s_addonFileRoot[data.fileName] = "Interface\\WasmAddOns";
+        LoadAddOnInfo(data.fileName);
+        UIADDON* addon = s_addons.Ptr(data.fileName);
+        std::string text;
+        if (addon && ReadWasmToml(data.fileName, text)) ApplyWasmDescription(addon, text.c_str());
+        return 0;
+    }
+    SStrPrintf(path, sizeof(path), "Interface\\WasmAddOns\\%s\\addon.toml", data.fileName);
+    if (LooseFile(path)) RegisterWasmPackage(data.fileName);
+    return 0;
+}
+
 // VERIFY: 605b03d2 manual
 // OFFSET: 0x005F8F50
 void InitializeAddOns() {
     ListInterfaceArchive("Interface\\AddOns\\", EnumAddOnsArchive, nullptr);
     OsFileList("Interface\\AddOns\\", "*", EnumAddOnsDisk, nullptr, 0);
+    OsFileList("Interface\\WasmAddOns\\", "*", EnumWasmPackages, nullptr, 0);
 
     for (UIADDON* addon = s_addons.m_fulllist.Head(); addon; addon = s_addons.m_fulllist.Next(addon)) {
         for (uint32_t i = 0; i < addon->m_loadWith.Count(); i++) {
@@ -1416,6 +1643,8 @@ void InitializeAddOns() {
             }
         }
     }
+
+    RebuildAddOnList();
 }
 
 // VERIFY: 0f76c1b3 auto

@@ -46,6 +46,13 @@ class CGItem_C : public CGObject_C, public CGItem {
     static int32_t NumBaseCharges(int32_t itemId);
     static void RemoveNameFromCache(const char* name);
     static const char* GetInventoryArt(int32_t displayId);
+    static uint32_t GetClassID(int32_t itemId);
+    static uint32_t GetDisplayID(int32_t itemId);
+    static uint32_t GetInventoryType(int32_t itemId);
+    static uint32_t GetMaterial(int32_t itemId);
+    static uint32_t GetSheatheType(int32_t itemId);
+    static uint32_t GetSoundOverrideSubclassID(int32_t itemId);
+    static uint32_t GetSubtypeID(int32_t itemId);
     const char* GetInventoryArt() const;
 
     /* 00DC */ TSList<void> m_itemMirrorLists [58];
@@ -109,7 +116,7 @@ class CGItem_C : public CGObject_C, public CGItem {
     int32_t GetEnchantmentSpell(int32_t a1);
     void GetSpellCooldownInfo(uint32_t& cooldown, uint32_t& categoryCooldown, uint32_t& category);
     bool IsBoundForTrade();
-    bool IsPetition();
+    bool IsBoundToAccount();
     bool IsInstanceBound() const;
     bool IsPermanentlyBoundForTrade();
     bool IsZoneBound() const;

@@ -185,6 +185,79 @@ AuctionItemInfo* GetBidderAuction(uint32_t index) {
     return &CGAuctionHouse::m_bidderList.m_data[index];
 }
 
+int32_t CGAuctionHouse::PlaceBidNative(int32_t listKind, uint32_t index, uint32_t bid) {
+    if (!CGGameUI::CanPerformAction(8)) {
+        return 1;
+    }
+
+    AuctionItemInfo* auction = nullptr;
+    if (listKind == 0) {
+        auction = GetListAuction(index);
+    } else if (listKind == 1) {
+        auction = GetOwnerAuction(index);
+    } else if (listKind == 2) {
+        auction = GetBidderAuction(index);
+    }
+
+    CGPlayer_C* player = ClntObjMgrGetActivePlayerObj();
+    WOWGUID auctioneer = CGAuctionHouse::m_auctioneer;
+
+    if (!auction || !player || !auctioneer) {
+        return 1;
+    }
+
+    if (auction->m_buyout && bid > auction->m_buyout) {
+        bid = auction->m_buyout;
+    }
+
+    if (bid < auction->m_minBid) {
+        CGGameUI::DisplayError(ERR_AUCTION_MIN_BID);
+        return 2;
+    }
+
+    if (bid <= auction->m_bid) {
+        CGGameUI::DisplayError(ERR_AUCTION_HIGHER_BID);
+        return 3;
+    }
+
+    if (auction->m_bid && bid < auction->m_bid + auction->m_minIncrement && (!auction->m_buyout || bid < auction->m_buyout)) {
+        CGGameUI::DisplayError(ERR_AUCTION_BID_INCREMENT);
+        return 4;
+    }
+
+    if (bid > 2000000000 && bid > auction->m_bid + auction->m_minIncrement) {
+        return 5;
+    }
+
+    uint32_t cost = bid;
+
+    if (auction->m_bidder == player->m_obj->m_guid) {
+        cost = bid - auction->m_bid;
+    }
+
+    if (player->GetCoinage() < cost) {
+        CGGameUI::DisplayError(ERR_NOT_ENOUGH_MONEY);
+        return 6;
+    }
+
+    WOWGUID none = WOWGUID();
+    ItemStats_C* stats = g_itemDBCache.GetRecord(auction->m_itemID, none, nullptr, nullptr, false);
+
+    if (stats && !player->GetBag()->ItemCountValid(auction->m_itemID, stats, auction->m_count, true)) {
+        return 7;
+    }
+
+    CDataStore msg;
+    msg.Put(static_cast<uint32_t>(CMSG_AUCTION_PLACE_BID));
+    msg.Put(auctioneer.m_guid);
+    msg.Put(auction->m_auctionID);
+    msg.Put(bid);
+    msg.Finalize();
+    ClientServices::Send2(&msg);
+    CGAuctionHouse::m_lastBidAmount = bid;
+    return 0;
+}
+
 // VERIFY: 1c82549b auto
 // OFFSET: 0x0059DFB0
 void CGAuctionHouse::EnterWorld() {
@@ -1204,7 +1277,7 @@ bool CGAuctionHouse::IsSellItemValid(CGItem_C* item, int32_t showError) {
         error = ERR_AUCTION_USED_CHARGES;
     } else if (item->IsBound()) {
         error = stats->m_bonding != 4 ? ERR_AUCTION_BOUND_ITEM : ERR_AUCTION_QUEST_ITEM;
-    } else if (item->GetItemStaticFlags(0) & ITEM_FLAG_CONJURED) {
+    } else if (item->GetItemStaticFlags(0) & 0x2) {
         error = ERR_AUCTION_CONJURED_ITEM;
     } else if (((item->GetItemStaticFlags(0) & 0x10000) && static_cast<int32_t>(stats->m_duration) > 0) || stats->m_holidayId) {
         error = ERR_AUCTION_LIMITED_DURATION_ITEM;
@@ -1215,11 +1288,11 @@ bool CGAuctionHouse::IsSellItemValid(CGItem_C* item, int32_t showError) {
     } else {
         const CGBag_C* bag;
 
-        if ((item->m_obj->m_type & TYPE_CONTAINER) && (bag = static_cast<const CGItem_C*>(item)->GetBag()) && bag->GetNumItems()) {
+        if ((item->m_obj->m_type & TYPEMASK_CONTAINER) && (bag = static_cast<const CGItem_C*>(item)->GetBag()) && bag->GetNumItems()) {
             error = ERR_AUCTION_BAG;
-        } else if (item->m_item->m_itemFieldFlags & ITEM_DFLAG_WRAPPED) {
+        } else if (item->m_item->m_itemFieldFlags & 0x8) {
             error = ERR_AUCTION_WRAPPED_ITEM;
-        } else if (item->GetItemStaticFlags(0) & ITEM_FLAG_HAS_LOOT) {
+        } else if (item->GetItemStaticFlags(0) & 0x4) {
             error = ERR_AUCTION_LOOT_ITEM;
         } else {
             return true;
@@ -1730,13 +1803,13 @@ static int32_t FindSellItemsCallback(const CGItem_C* item, void* param) {
 // VERIFY: 26ac0b42 manual
 // OFFSET: 0x0059F640
 int32_t FindItemForAuction(WOWGUID item, uint32_t count) {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         return 0;
     }
 
-    CGItem_C* sellItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPE_ITEM, __FILE__, __LINE__));
+    CGItem_C* sellItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPEMASK_ITEM, __FILE__, __LINE__));
 
     if (!sellItem) {
         return 0;
@@ -1757,7 +1830,7 @@ int32_t FindItemForAuction(WOWGUID item, uint32_t count) {
 // VERIFY: f69c4580 manual
 // OFFSET: 0x0059F6E0
 int32_t FindSellableItems(int32_t itemId) {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         return 0;
@@ -1798,7 +1871,7 @@ int32_t Packet_MSG_AUCTION_HELLO(void* param, NETMESSAGE msgId, uint32_t time, C
 // VERIFY: 7f72240d manual
 // OFFSET: 0x0059FFB0
 int32_t Packet_SMSG_AUCTION_COMMAND_RESULT(void* param, NETMESSAGE msgId, uint32_t time, CDataStore* msg) {
-    uint32_t inventoryError = BAG_INTERNAL_BAG_ERROR;
+    uint32_t inventoryError = 40;
     uint32_t auctionID;
     uint32_t action;
     uint32_t result;

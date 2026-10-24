@@ -3,6 +3,11 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <strings.h>
+#include <sys/stat.h>
+#endif
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Mopaq/IOMpqUnit.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Mopaq/SFile.h"
@@ -940,6 +945,75 @@ void System_SFile2::BuildFileSystemHash() {
     Blizzard::Log::Flush(0);
 }
 
+#if !defined(_WIN32)
+// ʕ •ᴥ•ʔ✿ WoW addons are written for a case-insensitive disk. Linux ntfs is not ✿ ʕ •ᴥ•ʔ
+static bool LooseAddonCase(const char* name, char* resolved, uint32_t size) {
+    char native[512];
+    uint32_t length = 0;
+    for (const char* cursor = name; *cursor && length + 1 < sizeof(native); cursor++) {
+        native[length++] = *cursor == '\\' ? '/' : *cursor;
+    }
+    native[length] = '\0';
+    if (!native[0]) return false;
+
+    char built[512];
+    built[0] = '\0';
+    const char* cursor = native;
+    if (*cursor == '/') {
+        built[0] = '/';
+        built[1] = '\0';
+        cursor++;
+    }
+
+    while (*cursor) {
+        const char* slash = strchr(cursor, '/');
+        char part[256];
+        uint32_t partLen = slash ? static_cast<uint32_t>(slash - cursor) : static_cast<uint32_t>(strlen(cursor));
+        if (partLen == 0 || partLen >= sizeof(part)) {
+            cursor = slash ? slash + 1 : cursor + partLen;
+            continue;
+        }
+        memcpy(part, cursor, partLen);
+        part[partLen] = '\0';
+        cursor = slash ? slash + 1 : cursor + partLen;
+        if (!strcmp(part, ".")) continue;
+
+        char exact[512];
+        if (built[0] == '\0') snprintf(exact, sizeof(exact), "%s", part);
+        else if (built[strlen(built) - 1] == '/') snprintf(exact, sizeof(exact), "%s%s", built, part);
+        else snprintf(exact, sizeof(exact), "%s/%s", built, part);
+
+        struct stat info;
+        const char* chosen = part;
+        char matched[256];
+        if (stat(exact, &info) != 0) {
+            DIR* directory = opendir(built[0] ? built : ".");
+            if (!directory) return false;
+            bool found = false;
+            while (dirent* entry = readdir(directory)) {
+                if (!strcasecmp(entry->d_name, part)) {
+                    snprintf(matched, sizeof(matched), "%s", entry->d_name);
+                    chosen = matched;
+                    found = true;
+                    break;
+                }
+            }
+            closedir(directory);
+            if (!found) return false;
+        }
+
+        if (built[0] == '\0') snprintf(built, sizeof(built), "%s", chosen);
+        else if (built[strlen(built) - 1] == '/') snprintf(built + strlen(built), sizeof(built) - strlen(built), "%s", chosen);
+        else snprintf(built + strlen(built), sizeof(built) - strlen(built), "/%s", chosen);
+    }
+
+    if (strlen(built) + 1 > size) return false;
+    for (uint32_t i = 0; built[i]; i++) resolved[i] = built[i] == '/' ? '\\' : built[i];
+    resolved[strlen(built)] = '\0';
+    return built[0] != '\0';
+}
+#endif
+
 // VERIFY: f3281a6b manual
 // OFFSET: 0x00424780
 bool System_SFile2::FindFile(const char* name, char* path, uint32_t size, uint32_t flags, SFILE_TYPE* type, System_SFile::ARCHIVEREC** archive) {
@@ -951,6 +1025,21 @@ bool System_SFile2::FindFile(const char* name, char* path, uint32_t size, uint32
 
     if (s_useOldFindFile || (name[0] == '\\' && name[1] == '\\') || name[1] == ':') {
         return OldFindFile(name, path, size, flags, type);
+    }
+
+    // ʕ •ᴥ•ʔ✿ Streaming serves signaturefile at CDN root before patch-3 finishes; prefer a loose copy ✿ ʕ •ᴥ•ʔ
+    if (Blizzard::String::EqualI(name, "signaturefile")) {
+        char loose[512];
+        Blizzard::String::Copy(loose, SFile::m_basePath, sizeof(loose));
+        Blizzard::String::Append(loose, "signaturefile", sizeof(loose));
+
+        Blizzard::File::StreamRecord* stream = nullptr;
+        if (Blizzard::File::Open(loose, 0x1005, stream)) {
+            Blizzard::File::Close(stream);
+            Blizzard::String::Copy(path, loose, size);
+            *type = SFILE_PLAIN;
+            return true;
+        }
     }
 
     if (flags & 3) {
@@ -1010,6 +1099,27 @@ bool System_SFile2::FindFile(const char* name, char* path, uint32_t size, uint32
         *type = SFILE_OLD_SFILE;
 
         return true;
+    }
+
+    // ʕ •ᴥ•ʔ✿ Addon files live on disk under Interface/. The archive hash does not have to know them first ✿ ʕ •ᴥ•ʔ
+    bool addonPath = Blizzard::String::FindI(name, "Interface\\AddOns\\", 0x7FFFFFFF) || Blizzard::String::FindI(name, "Interface/AddOns/", 0x7FFFFFFF) || Blizzard::String::FindI(name, "Interface\\WasmAddOns\\", 0x7FFFFFFF) || Blizzard::String::FindI(name, "Interface/WasmAddOns/", 0x7FFFFFFF);
+    if (addonPath) {
+        Blizzard::File::StreamRecord* stream = nullptr;
+        if (Blizzard::File::Open(name, 0x1005, stream)) {
+            Blizzard::File::Close(stream);
+            Blizzard::String::Copy(path, name, size);
+            *type = SFILE_PLAIN;
+            return true;
+        }
+#if !defined(_WIN32)
+        char folded[512];
+        if (LooseAddonCase(name, folded, sizeof(folded)) && Blizzard::File::Open(folded, 0x1005, stream)) {
+            Blizzard::File::Close(stream);
+            Blizzard::String::Copy(path, folded, size);
+            *type = SFILE_PLAIN;
+            return true;
+        }
+#endif
     }
 
     return false;

@@ -23,6 +23,7 @@ class CCamera;
 class CFacet;
 struct CGxBuf;
 struct CGxPool;
+struct M2VertexUploadCache;
 class CImVector;
 class CM2Lighting;
 class CM2Model;
@@ -221,6 +222,7 @@ class CM2Model {
     /* 02E4 */ uint32_t m_hitTestGroup;
     /* 02E8 */ uint32_t m_handle;
     /* 02EC */ uint32_t unused_02EC;
+    /* 02F0 */ M2VertexUploadCache* m_vertexUploads;
 
     static void (*s_transformVertices[5])(CM2Model*, M2SkinSection*, uint8_t*, int32_t);
     static TSGrowableArray<M2ModelCallback> s_sequenceCallbacks;
@@ -235,6 +237,8 @@ class CM2Model {
     static void TransformVerticesNoUVSelect_cpp(const CM2Model* model, const M2SkinSection* section, M2VertexPNT2* out);
     static void TransformVerticesOneBone_cpp(CM2Model* model, M2SkinSection* section, uint8_t* vertices, int32_t texCoord);
     static void TransformVerticesOneBone_sse(CM2Model* model, M2SkinSection* section, uint8_t* vertices, int32_t texCoord);
+    static void TransformVertices_avx2(CM2Model* model, M2SkinSection* section, uint8_t* vertices, int32_t texCoord);
+    static void TransformVerticesOneBone_avx2(CM2Model* model, M2SkinSection* section, uint8_t* vertices, int32_t texCoord);
 
     CM2Model();
     ~CM2Model();

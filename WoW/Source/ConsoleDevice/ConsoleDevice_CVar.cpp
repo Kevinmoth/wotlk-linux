@@ -2,12 +2,15 @@
 #include <cstdio>
 #include <cstring>
 #include "ConsoleDevice.h"
+#include "Engine/Source/Base/CmdLine.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/CGxDevice/Types.h"
 #include "Engine/Source/Gx/CGxFormat.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Gx/WowDecompVk.h"
+#include "Engine/Source/Gxu/GxuFont.h"
 #include "Engine/Source/Os/Input.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/Client.h"
@@ -156,7 +159,66 @@ static bool CVGxTripleBufferCallback(CVar* var, const char* oldValue, const char
 
 // VERIFY: 1b35a664 auto
 // OFFSET: 0x007693B0
+static bool GxApiFromName(const char* name, EGxApi& api) {
+    for (int32_t i = GxApi_OpenGl; i < GxApis_Last; i++) {
+        if (name && !SStrCmpI(name, g_gxApiNames[i], STORM_MAX_STR)) {
+            api = static_cast<EGxApi>(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool GxApiPortable(EGxApi api) {
+    return api == GxApi_OpenGl || api == GxApi_D3d9 || api == GxApi_D3d9Ex
+#if defined(WOWDECOMP_VULKAN)
+        || api == GxApi_Vulkan
+#endif
+    ;
+}
+
+EGxApi ConsoleDeviceRequestedApi(bool* fromCmdLine) {
+    if (fromCmdLine) *fromCmdLine = false;
+    static const struct { CMDOPT opt; EGxApi api; } kCmdLine[] = {
+        { CMD_D3D9EX, GxApi_D3d9Ex },
+        { CMD_D3D, GxApi_D3d9 },
+#if defined(WOWDECOMP_VULKAN)
+        { CMD_VULKAN, GxApi_Vulkan },
+#endif
+        { CMD_OPENGL, GxApi_OpenGl },
+    };
+    for (auto& entry : kCmdLine) {
+        if (CmdLineGetBool(entry.opt) && GxApiSupported(entry.api)) {
+            if (fromCmdLine) *fromCmdLine = true;
+            return entry.api;
+        }
+    }
+    EGxApi api;
+    if (s_cvGxApi && GxApiFromName(s_cvGxApi->m_stringValue.m_str, api) && GxApiSupported(api)) {
+        return api;
+    }
+    return GxDefaultApi();
+}
+
+EGxApi ConsoleDeviceApi() {
+    return g_theGxDevicePtr ? g_theGxDevicePtr->DeviceApi() : ConsoleDeviceRequestedApi(nullptr);
+}
+
 static bool CVGxApiCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    EGxApi requested;
+    if (GxApiFromName(value, requested)) {
+        if (GxApiSupported(requested)) {
+            ConsoleWrite("GxApi set pending gxRestart", DEFAULT_COLOR);
+            return true;
+        }
+#if defined(WOWDECOMP_UNIX) || defined(WOWDECOMP_VULKAN)
+        // ʕ ◕ᴥ◕ ʔ✿ Config.wtf is shared across platforms: keep foreign names, the helper maps them locally ✿ ʕ ◕ᴥ◕ ʔ
+        if (GxApiPortable(requested)) {
+            return true;
+        }
+#endif
+    }
+
     for (int32_t api = GxApi_OpenGl; api < GxApis_Last; api++) {
         if (GxApiSupported(static_cast<EGxApi>(api)) && !SStrCmpI(value, g_gxApiNames[api], STORM_MAX_STR)) {
             ConsoleWrite("GxApi set pending gxRestart", DEFAULT_COLOR);
@@ -524,6 +586,59 @@ static bool CVVideoOptionsVersionCallback(CVar* var, const char* oldValue, const
     return true;
 }
 
+static bool CVGxMsdfFontsCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    int32_t enabled = SStrToInt(value) != 0;
+
+    GxuFontSetMsdfEnabled(enabled);
+
+    if (!enabled) {
+        WowDecompVk_SetMsdfView(0);
+
+        if (CVar* view = CVar::Lookup("gxMsdfView")) {
+            view->Set("0", true, false, false, true);
+        }
+    }
+
+    return true;
+}
+
+static bool CVGxMsdfRangeCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    float range = SStrToFloat(value);
+
+    if (range < 1.0f || range > 8.0f) {
+        ConsoleWrite("gxMsdfRange must be 1-8.", DEFAULT_COLOR);
+        return false;
+    }
+
+    GxuFontSetMsdfRange(range);
+    WowDecompVk_SetMsdfRange(range);
+    return true;
+}
+
+static bool CVGxMsdfSharpCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    float sharp = SStrToFloat(value);
+
+    if (sharp < 0.25f || sharp > 4.0f) {
+        ConsoleWrite("gxMsdfSharp must be 0.25-4.", DEFAULT_COLOR);
+        return false;
+    }
+
+    WowDecompVk_SetMsdfSharp(sharp);
+    return true;
+}
+
+static bool CVGxMsdfViewCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    int32_t view = SStrToInt(value);
+
+    if (view < 0 || view > 2) {
+        ConsoleWrite("gxMsdfView must be 0, 1, or 2.", DEFAULT_COLOR);
+        return false;
+    }
+
+    WowDecompVk_SetMsdfView(view);
+    return true;
+}
+
 // VERIFY: 62bcef94 auto
 // OFFSET: 0x00769C90
 void RegisterStereoCVars() {
@@ -574,4 +689,8 @@ void RegisterGxCVars() {
     s_cvVideoOptionsVersion = CVar::Register("videoOptionsVersion", "Video options version", 3, "0", CVVideoOptionsVersionCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvWindowResizeLock = CVar::Register("windowResizeLock", "prevent resizing in windowed mode", 1, "0", CVGxWindowResizeLockCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvFixedFunction = CVar::Register("fixedFunction", "Force fixed function rendering", 3, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("gxMsdfFonts", "sample UI fonts as multi-channel distance fields", 1, "0", CVGxMsdfFontsCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("gxMsdfRange", "distance-field range in atlas texels", 1, "4", CVGxMsdfRangeCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("gxMsdfSharp", "distance-field edge sharpness", 1, "1", CVGxMsdfSharpCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("gxMsdfView", "0 shaded, 1 color channels, 2 signed distance", 1, "0", CVGxMsdfViewCallback, CATEGORY_GRAPHICS, false, nullptr, false);
 }

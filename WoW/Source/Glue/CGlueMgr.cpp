@@ -1,9 +1,11 @@
 #include "CGlueMgr.h"
 #include <cmath>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #include "Engine/Source/Base/CDataStore.h"
+#include "Engine/Source/Base/CmdLine.h"
 #include "Engine/Source/Base/Coordinate.h"
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Streaming/Streaming.h"
@@ -45,6 +47,7 @@
 #include "WoW/Source/Game/GameClient/FFXEffects.h"
 #include "WoW/Source/Game/ValidateName.h"
 #include "WoW/Source/Glue/CharacterCreation.h"
+#include "WoW/Source/WasmAddonClient.h"
 #include "WoW/Source/Glue/CharacterSelection.h"
 #include "WoW/Source/Glue/CSimpleModelFFX.h"
 #include "WoW/Source/Glue/CWOWClientStatus.h"
@@ -647,19 +650,24 @@ void CGlueMgr::ProcessAgreements(CGlueMgr::Agreements* agreements) {
 // VERIFY: fbc4fd55 auto
 // OFFSET: 0x004D8860
 void CGlueMgr::HandleDisplaySizeChanged(const CSizeEvent& event) {
-    if (CGlueMgr::m_screenWidth > 0 && CGlueMgr::m_screenWidth == event.m_data.m_w && CGlueMgr::m_screenHeight > 0 && CGlueMgr::m_screenHeight == event.m_data.m_h) {
+    float aspect = Screen::GetAspectRatio();
+    int32_t sameSize = CGlueMgr::m_screenWidth > 0 && CGlueMgr::m_screenWidth == event.m_data.m_w && CGlueMgr::m_screenHeight > 0 && CGlueMgr::m_screenHeight == event.m_data.m_h;
+
+    // ʕ •ᴥ•ʔ✿ Fullscreen desktop keeps the same drawable when only gxResolution changes ✿ ʕ •ᴥ•ʔ
+    if (sameSize && fabs(CGlueMgr::m_aspect - aspect) < 0.01f) {
         return;
     }
 
-    CGlueMgr::m_screenWidth = event.m_data.m_w;
-    CGlueMgr::m_screenHeight = event.m_data.m_h;
+    if (!sameSize) {
+        CGlueMgr::m_screenWidth = event.m_data.m_w;
+        CGlueMgr::m_screenHeight = event.m_data.m_h;
 
-    float aspect = Screen::GetAspectRatio();
-    CSimpleFrame* glueParent = static_cast<CSimpleFrame*>(CScriptObject::GetScriptObjectByName("GlueParent", CSimpleFrame::GetObjectType()));
+        CSimpleFrame* glueParent = static_cast<CSimpleFrame*>(CScriptObject::GetScriptObjectByName("GlueParent", CSimpleFrame::GetObjectType()));
 
-    if (glueParent) {
-        glueParent->SetFrameScale(1.0f, true);
-        CLayoutFrame::ResizePending();
+        if (glueParent) {
+            glueParent->SetFrameScale(1.0f, true);
+            CLayoutFrame::ResizePending();
+        }
     }
 
     if (fabs(CGlueMgr::m_aspect - aspect) < 0.01f) {
@@ -704,6 +712,7 @@ void CGlueMgr::Resume() {
     control->UpdateMouseMode(1);
 
     FrameScript_Flush();
+    WasmAddonClient_OnScriptReset();
     SystemRegisterFunctions();
     RegisterSimpleFrameScriptMethods();
     GlueScriptEventsRegisterFunctions();
@@ -758,6 +767,7 @@ void CGlueMgr::Resume() {
             }
 #endif
 
+            CGVideoOptions::InstallExtendedViewUiPatch();
             FrameScript_SignalEvent(GLUE_EVENT_FRAMES_LOADED, nullptr);
             CGlueMgr::InitializeFFX();
 
@@ -832,9 +842,9 @@ void CGlueMgr::UpdateCurrentScreen(const char* screen) {
     SStrCopy(CGlueMgr::m_currentScreen, screen, sizeof(CGlueMgr::m_currentScreen));
 
     if (!SStrCmpI(CGlueMgr::m_currentScreen, "charselect", STORM_MAX_STR)) {
-        EventRegisterEx(EVENT_ID_IDLE, CCharacterSelection::Idle, nullptr, EVENT_PRIORITY_NORMAL);
+        EventRegisterEx(EVENT_ID_IDLE, CCharacterSelection::Idle, nullptr, 0.0f);
     } else if (!SStrCmpI(CGlueMgr::m_currentScreen, "charcreate", STORM_MAX_STR)) {
-        EventRegisterEx(EVENT_ID_IDLE, CCharacterCreation::Idle, nullptr, EVENT_PRIORITY_NORMAL);
+        EventRegisterEx(EVENT_ID_IDLE, CCharacterCreation::Idle, nullptr, 0.0f);
     }
 }
 
@@ -857,7 +867,7 @@ int32_t CGlueMgr::ShowChangedOptionWarnings() {
 // VERIFY: 253dd4f3 auto
 // OFFSET: 0x004D84A0
 int32_t CGlueMgr::HandleBattlenetDisconnect() {
-    if (CGlueMgr::m_loginState != LOGIN_STATE_FAILED || CGlueMgr::m_loginResult != LOGIN_DISCONNECTED || CGlueMgr::m_showedDisconnect) {
+    if (CGlueMgr::m_loginState != 5 || CGlueMgr::m_loginResult != 21 || CGlueMgr::m_showedDisconnect) {
         return 0;
     }
 
@@ -1068,7 +1078,7 @@ void CGlueMgr::Initialize() {
     FrameXML_RegisterFactory("ModelFFX", CSimpleModelFFX::Create, false);
     CGlueMgr::Resume();
     CRealmList::Initialize();
-    EventRegisterEx(EVENT_ID_IDLE, CGlueMgr::Idle, nullptr, EVENT_PRIORITY_NORMAL);
+    EventRegisterEx(EVENT_ID_IDLE, CGlueMgr::Idle, nullptr, 0.0f);
     CGLCD::Initialize();
     CKBPage::Initialize();
     CKBSystem::Initialize();
@@ -1081,9 +1091,290 @@ void CGlueMgr::Initialize() {
     AccountDataInitializeBasicSystem();
 }
 
+// -- ʕ •ᴥ•ʔ✿ WOWDECOMP_AUTOLOGIN=user:pass[:character] presses login without a keyboard ✿ ʕ •ᴥ•ʔ
+static bool AutoLoginGlueScreen(const char* screen) {
+    return !SStrCmpI(CGlueMgr::m_currentScreen, screen, STORM_MAX_STR);
+}
+
+static void AutoLoginTrimSpec(char* spec) {
+    size_t len = SStrLen(spec);
+
+    while (len > 0 && (spec[len - 1] == '\r' || spec[len - 1] == '\n' || spec[len - 1] == ' ' || spec[len - 1] == '\t')) {
+        spec[len - 1] = '\0';
+        len--;
+    }
+
+    size_t start = 0;
+
+    while (spec[start] == ' ' || spec[start] == '\t') {
+        start++;
+    }
+
+    if (start > 0) {
+        SStrCopy(spec, spec + start, STORM_MAX_STR);
+    }
+}
+
+static const char* AutoLoginSpec() {
+    static char specBuf[128];
+    static int32_t resolved = 0;
+
+    if (!resolved) {
+        resolved = 1;
+        const char* spec = std::getenv("WOWDECOMP_AUTOLOGIN");
+
+        if (!spec || !spec[0]) {
+            spec = CmdLineGetString(CMD_AUTOLOGIN);
+        }
+
+        if (spec && spec[0]) {
+            SStrCopy(specBuf, spec, sizeof(specBuf));
+            AutoLoginTrimSpec(specBuf);
+        } else if (OsFileExists("wowdecomp-autologin.txt")) {
+            HOSFILE file = OsCreateFile("wowdecomp-autologin.txt", OS_GENERIC_READ, 0, OS_OPEN_EXISTING, OS_FILE_ATTRIBUTE_NORMAL, OS_FILE_TYPE_ANY);
+
+            if (file != OS_INVALID_FILE) {
+                uint32_t read = 0;
+
+                if (OsReadFile(file, specBuf, sizeof(specBuf) - 1, &read) && read > 0) {
+                    specBuf[read] = '\0';
+                    AutoLoginTrimSpec(specBuf);
+                } else {
+                    specBuf[0] = '\0';
+                }
+
+                OsCloseFile(file);
+            }
+        } else {
+            specBuf[0] = '\0';
+        }
+    }
+
+    return specBuf[0] ? specBuf : nullptr;
+}
+
+static void AutoLoginPrepareGlue() {
+    CGlueMgr::m_scandllOkayToLogIn = 1;
+    CGlueMgr::m_acceptedTOS = 1;
+    CGlueMgr::m_acceptedEULA = 1;
+    CGlueMgr::m_acceptedScanning = 1;
+    CGlueMgr::m_acceptedContest = 1;
+    CGlueMgr::m_acceptedTerminationWithoutNotice = 1;
+
+    if (CGlueMgr::m_idleState == IDLE_14) {
+        CGlueMgr::m_idleState = IDLE_NONE;
+        CGlueMgr::m_showedDisconnect = 0;
+    }
+}
+
+static bool AutoLoginParseCredentials(const char* spec, char* user, size_t userBytes, char* pass, size_t passBytes, char* wantName, size_t wantNameBytes) {
+    const char* colon = strchr(spec, ':');
+
+    if (!colon || colon == spec) {
+        return false;
+    }
+
+    size_t userLen = static_cast<size_t>(colon - spec);
+
+    if (!userLen || userLen >= userBytes) {
+        return false;
+    }
+
+    memcpy(user, spec, userLen);
+    user[userLen] = '\0';
+    const char* name = strchr(colon + 1, ':');
+
+    if (name) {
+        size_t passLen = static_cast<size_t>(name - (colon + 1));
+
+        if (!passLen || passLen >= passBytes) {
+            return false;
+        }
+
+        memcpy(pass, colon + 1, passLen);
+        pass[passLen] = '\0';
+        SStrCopy(wantName, name + 1, wantNameBytes);
+    } else {
+        SStrCopy(pass, colon + 1, passBytes);
+        wantName[0] = '\0';
+    }
+
+    return true;
+}
+
+static REALM_INFO* AutoLoginPickRealm(LoginResponse* response) {
+    REALM_INFO* realm = &response->m_realmList.m_data[0];
+    const char* saved = ClientServices::GetSelectedRealmName();
+
+    for (uint32_t i = 0; i < response->m_realmList.m_count; ++i) {
+        if (saved && saved[0] && !SStrCmpI(response->m_realmList.m_data[i].m_realmName, saved, STORM_MAX_STR)) {
+            return &response->m_realmList.m_data[i];
+        }
+    }
+
+    return realm;
+}
+
+static bool AutoLoginEnsureRealmSelected() {
+    if (ClientServices::GetSelectedRealm()) {
+        return true;
+    }
+
+    if (ClientServices::SetSelectedRealmInfo(0)) {
+        return true;
+    }
+
+    LoginResponse* response = ClientServices::CreateLoginResponse();
+
+    if (!response || !response->m_realmList.m_count) {
+        return false;
+    }
+
+    if (CGlueMgr::m_idleState != IDLE_NONE) {
+        return false;
+    }
+
+    CGlueMgr::ChangeRealm(AutoLoginPickRealm(response));
+    return false;
+}
+
+static void MaybeAutoLogin() {
+    const char* spec = AutoLoginSpec();
+
+    if (!spec) {
+        return;
+    }
+
+    AutoLoginPrepareGlue();
+
+    if (CGlueMgr::m_idleState == IDLE_ENTER_WORLD || CGlueMgr::m_idleState == IDLE_WORLD_LOGIN) {
+        return;
+    }
+
+    static int32_t started = 0;
+    static int32_t realmDone = 0;
+    static char wantName[64];
+    static int32_t parsedWantName = 0;
+
+    if (!parsedWantName) {
+        char user[64];
+        char pass[64];
+        char name[64];
+
+        if (AutoLoginParseCredentials(spec, user, sizeof(user), pass, sizeof(pass), name, sizeof(name))) {
+            SStrCopy(wantName, name, sizeof(wantName));
+        }
+
+        parsedWantName = 1;
+    }
+
+    if (!started) {
+        if (CGlueMgr::m_idleState != IDLE_NONE) {
+            return;
+        }
+
+        if (AutoLoginGlueScreen("charcreate") || AutoLoginGlueScreen("trialconvert")) {
+            return;
+        }
+
+        if (AutoLoginGlueScreen("charselect")) {
+            started = 1;
+            realmDone = 1;
+        } else {
+            char user[64];
+            char pass[64];
+            char discard[64];
+
+            if (!AutoLoginParseCredentials(spec, user, sizeof(user), pass, sizeof(pass), discard, sizeof(discard))) {
+                return;
+            }
+
+            CGlueMgr::LoginServerLogin(user, pass);
+
+            if (CGlueMgr::m_idleState == IDLE_LOGIN_SERVER_LOGIN) {
+                started = 1;
+            }
+        }
+
+        return;
+    }
+
+    if (!realmDone) {
+        if (CGlueMgr::m_idleState != IDLE_NONE) {
+            return;
+        }
+
+        if (AutoLoginGlueScreen("charselect") || ClientServices::m_selectRealmInfoValid) {
+            realmDone = 1;
+            return;
+        }
+
+        if (AutoLoginEnsureRealmSelected()) {
+            realmDone = 1;
+        }
+
+        return;
+    }
+
+    if (CGlueMgr::m_idleState != IDLE_NONE) {
+        return;
+    }
+
+    if (!AutoLoginGlueScreen("charselect")) {
+        return;
+    }
+
+    if (!CCharacterSelection::s_characterList.Count()) {
+        return;
+    }
+
+    if (!ClientServices::GetSelectedRealm()) {
+        AutoLoginEnsureRealmSelected();
+        return;
+    }
+
+    if (!ClientServices::Connection()->m_connected) {
+        return;
+    }
+
+    // ʕ •ᴥ•ʔ✿ The first enter can bounce back to the character screen. Wait, then press it again ✿ ʕ •ᴥ•ʔ
+    static int32_t wait = 90;
+
+    if (wait > 0) {
+        wait--;
+        return;
+    }
+
+    wait = 120;
+
+    int32_t index = 0;
+    uint32_t count = CCharacterSelection::s_characterList.Count();
+
+    if (wantName[0]) {
+        bool matched = false;
+
+        for (uint32_t i = 0; i < count; ++i) {
+            if (!SStrCmpI(CCharacterSelection::s_characterList[i].m_characterInfo.m_name, wantName, 48)) {
+                index = static_cast<int32_t>(i);
+                matched = true;
+                break;
+            }
+        }
+
+        if (!matched) {
+            return;
+        }
+    }
+
+    CCharacterSelection::s_selectionIndex = index;
+    CGlueMgr::EnterWorld();
+}
+
 // VERIFY: 5e7db3b8 manual
 // OFFSET: 0x004DAB40
 int32_t CGlueMgr::Idle(const void* data, void* param) {
+    MaybeAutoLogin();
+
     if (g_theGxDevicePtr->StereoEnabled()) {
         CGlueMgr::SetUIDepth(g_theGxDevicePtr->StereoGetConvergence());
     }
@@ -1146,7 +1437,7 @@ int32_t CGlueMgr::Idle(const void* data, void* param) {
     int32_t complete = connection->PollStatus(op, &statusText, result, errorCode);
 
     if (CGlueMgr::m_idleState == IDLE_LOGIN_SERVER_LOGIN) {
-        if (CGlueMgr::m_loginState != LOGIN_STATE_PIN_WAIT) {
+        if (CGlueMgr::m_loginState != 9) {
             CGlueMgr::DisplayLoginStatus();
         }
 
@@ -1159,14 +1450,14 @@ int32_t CGlueMgr::Idle(const void* data, void* param) {
         }
 
         switch (CGlueMgr::m_loginState) {
-            case LOGIN_STATE_FAILED: {
+            case 5: {
                 ClientServices::LoginConnection()->Logoff();
                 CGlueMgr::m_idleState = IDLE_NONE;
                 CGlueMgr::m_showedDisconnect = 0;
                 return 1;
             }
 
-            case LOGIN_STATE_DOWNLOADFILE: {
+            case 6: {
                 const char* fileName = ClientServices::LoginConnection()->m_fileName;
 
                 if (!SStrCmpI(fileName, "Patch", STORM_MAX_STR)) {
@@ -1181,15 +1472,15 @@ int32_t CGlueMgr::Idle(const void* data, void* param) {
                 return 1;
             }
 
-            case LOGIN_STATE_PIN: {
+            case 8: {
                 FrameScript_SignalEvent(GLUE_EVENT_CLOSE_STATUS_DIALOG, nullptr);
                 const uint8_t* keyMap = ClientServices::LoginConnection()->GetKeyMap();
                 FrameScript_SignalEvent(GLUE_EVENT_PLAYER_ENTER_PIN, "%d%d%d%d%d%d%d%d%d%d", keyMap[0], keyMap[1], keyMap[2], keyMap[3], keyMap[4], keyMap[5], keyMap[6], keyMap[7], keyMap[8], keyMap[9]);
-                CGlueMgr::m_loginState = LOGIN_STATE_PIN_WAIT;
+                CGlueMgr::m_loginState = 9;
                 return 1;
             }
 
-            case LOGIN_STATE_MATRIX: {
+            case 10: {
                 uint32_t width;
                 uint32_t height;
                 uint32_t minDigits;
@@ -1200,21 +1491,21 @@ int32_t CGlueMgr::Idle(const void* data, void* param) {
 
                 CGlueMgr::m_matrixChallengeCount = challengeCount;
                 CGlueMgr::m_matrixRemaining = challengeCount;
-                CGlueMgr::m_loginState = LOGIN_STATE_MATRIX_WAIT;
+                CGlueMgr::m_loginState = 11;
 
                 FrameScript_SignalEvent(GLUE_EVENT_CLOSE_STATUS_DIALOG, nullptr);
                 FrameScript_SignalEvent(GLUE_EVENT_PLAYER_ENTER_MATRIX, "%d%d%d%d%b%d", width, height, minDigits, maxDigits, flipCoords, challengeCount);
                 return 1;
             }
 
-            case LOGIN_STATE_TOKEN: {
-                CGlueMgr::m_loginState = LOGIN_STATE_TOKEN_WAIT;
+            case 12: {
+                CGlueMgr::m_loginState = 13;
                 FrameScript_SignalEvent(GLUE_EVENT_CLOSE_STATUS_DIALOG, nullptr);
                 FrameScript_SignalEvent(GLUE_EVENT_PLAYER_ENTER_TOKEN, nullptr);
                 return 1;
             }
 
-            case LOGIN_STATE_CHECKINGVERSIONS: {
+            case 14: {
                 uint8_t versionChecksum[20];
                 ChecksumExecutables(ClientServices::LoginConnection()->GetVersionChallenge(), 16, versionChecksum);
                 ClientServices::LoginConnection()->ProveVersion(versionChecksum);
@@ -1268,7 +1559,7 @@ int32_t CGlueMgr::Idle(const void* data, void* param) {
     }
 
     if (idleState == IDLE_ACCOUNT_LOGIN) {
-        if (ClientServices::LoginConnection()->GetLoginServerType() == 1 && CGlueMgr::m_loginState == LOGIN_STATE_FAILED) {
+        if (ClientServices::LoginConnection()->GetLoginServerType() == 1 && CGlueMgr::m_loginState == 5) {
             CGlueMgr::DisplayLoginStatus();
             ClientServices::Connection()->Cancel(2);
             ClientServices::LoginConnection()->Logoff();
@@ -1786,6 +2077,11 @@ void CGlueMgr::LogConnectionStatus(const char* format, ...) {
     s_connectionStatusLock.Enter();
 
     ConsoleString* string = s_connectionStatus.NewNode(2, 0, 0);
+
+    if (!string) {
+        s_connectionStatusLock.Leave();
+        return;
+    }
 
     va_list args;
     va_start(args, format);

@@ -1,5 +1,41 @@
 #if defined(WOWDECOMP_ARCH_64)
 
+#if defined(_M_ARM64)
+
+#include <windows.h>
+#include "Engine/Source/Storm/H/storm.h"
+#include "Engine/Source/Storm/Source/MachineState.h"
+
+int32_t g_memFullError;
+
+void LoadMachineStateSymbols() {
+}
+
+void UnloadMachineStateSymbols() {
+}
+
+void LogComputerInfoHeader(uint32_t logOptions, void (*logLineProc)(void*, const char*, ...), void* logLineProcParam, const char* headerTitleLine, const SYSTEMTIME* time) {
+    if (logLineProc && headerTitleLine) {
+        logLineProc(logLineProcParam, "%s", headerTitleLine);
+    }
+}
+
+void LogMachineState(uint32_t logOptions, void (*logLineProc)(void*, const char*, ...), void* logLineProcParam, uint32_t stackFramesToSkip, CONTEXT* context) {
+    if (logLineProc) {
+        logLineProc(logLineProcParam, "**** Stack/crash dump helpers are not implemented on Windows ARM64 yet.");
+    }
+}
+
+int32_t LogMiniDump(void* logfile, EXCEPTION_POINTERS* exceptionpointers, uint32_t count, const char** strings) {
+    return 0;
+}
+
+int32_t LogMiniDumpIsAvailable() {
+    return 0;
+}
+
+#elif defined(_M_X64)
+
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -650,6 +686,23 @@ static void sLogDbgHelpStackTrace(uint32_t logOptions, void (*logLineProc)(void*
     logLineProc(logLineProcParam, "");
 }
 
+static bool FramePointerReadable(const void* address) {
+    uintptr_t value = reinterpret_cast<uintptr_t>(address);
+
+    if (value < 0x10000 || (value & (sizeof(void*) - 1))) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION info;
+
+    if (!VirtualQuery(address, &info, sizeof(info)) || info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD)) {
+        return false;
+    }
+
+    DWORD protect = info.Protect & 0xFF;
+    return protect == PAGE_READONLY || protect == PAGE_READWRITE || protect == PAGE_WRITECOPY || protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY;
+}
+
 // OFFSET: 0x0077DB10
 static void sLogX86ManualStackTrace(void (*logLineProc)(void*, const char*, ...), void* logLineProcParam, DWORD_PTR registerEip, DWORD_PTR registerEbp, uint32_t stackFramesToSkip) {
     sLogHeader(logLineProc, logLineProcParam, "Stack Trace (Manual)");
@@ -706,7 +759,7 @@ static void sLogX86ManualStackTrace(void (*logLineProc)(void*, const char*, ...)
                 logLineProc(logLineProcParam, LOG_PTR " " LOG_PTR " %04X:%08X %s", eip, reinterpret_cast<DWORD_PTR>(ebp), section, offset, modulePath);
             }
 
-            if (IsBadWritePtr(ebp, 2 * sizeof(DWORD_PTR))) {
+            if (!FramePointerReadable(ebp)) {
                 break;
             }
 
@@ -714,15 +767,7 @@ static void sLogX86ManualStackTrace(void (*logLineProc)(void*, const char*, ...)
             DWORD_PTR* previous = ebp;
             ebp = reinterpret_cast<DWORD_PTR*>(ebp[0]);
 
-            if (reinterpret_cast<DWORD_PTR>(ebp) & 3) {
-                break;
-            }
-
-            if (ebp <= previous) {
-                break;
-            }
-
-            if (IsBadWritePtr(ebp, 2 * sizeof(DWORD_PTR))) {
+            if (ebp <= previous || !FramePointerReadable(ebp)) {
                 break;
             }
         }
@@ -1102,5 +1147,7 @@ void LogMachineState(uint32_t logOptions, void (*logLineProc)(void*, const char*
 
     InterlockedDecrement(&sgRecursionLevel);
 }
+
+#endif
 
 #endif

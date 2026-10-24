@@ -34,7 +34,7 @@ static CInitCritSect s_refCritsect;
 
 // STATIC: [0x00CB49C8, 0x00CB5DC8]
 template <class T>
-CDebugLockEntry TDebugLock<T>::s_entries[CDebugLock::MAX_ENTRIES];
+CDebugLockEntry TDebugLock<T>::s_entries[256];
 
 // STATIC: [0x00CB71C8<CDebugSCritSect>, 0x00CB71F0<CDebugSRWLock>]
 template <class T>
@@ -464,7 +464,7 @@ void TDebugLock<T>::DumpEntries(CDebugLock* lock) {
     uint32_t index = lock->m_entry;
 
     while (index) {
-        if (index >= CDebugLock::MAX_ENTRIES) {
+        if (index >= 256) {
             SDebugPrintf("%s(%u) : CDebugLock:%08x: entry has bad next %u\n", __FILE__, __LINE__, lock, index);
 
             if (entry) {

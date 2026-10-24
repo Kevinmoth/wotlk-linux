@@ -193,7 +193,7 @@ int32_t CGTradeInfo::SetPlayerItem(uint32_t slot, WOWGUID item, WOWGUID containe
         }
 
         if (slot == 6) {
-            CGItem_C* object = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPE_ITEM, __FILE__, __LINE__));
+            CGItem_C* object = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPEMASK_ITEM, __FILE__, __LINE__));
             bool bound = object && object->IsBound() && !object->IsBoundForTrade();
             FrameScript_SignalEvent(SCRIPT_EVENT_TRADE_POTENTIAL_BIND_ENCHANT, "%b", bound);
         }
@@ -297,16 +297,16 @@ void CGTradeInfo::UnlockTradeItems() {
 // OFFSET: 0x00586520
 int32_t CGTradeInfo::GetGameError(int32_t error, int32_t target) {
     switch (error) {
-        case BAG_FULL:
+        case 4:
             return target ? ERR_TRADE_BAG_FULL : ERR_TRADE_TARGET_BAG_FULL;
 
-        case BAG_ITEM_MAX_COUNT:
+        case 17:
             return target ? ERR_TRADE_TARGET_MAX_COUNT_EXCEEDED : ERR_TRADE_MAX_COUNT_EXCEEDED;
 
-        case BAG_SPELL_FAILED_REAGENTS_GENERIC:
+        case 28:
             return target ? ERR_MAX_VALUE : ERR_SPELL_FAILED_REAGENTS_GENERIC;
 
-        case BAG_ITEM_MAX_LIMIT_CATEGORY_COUNT_EXCEEDED_IS:
+        case 84:
             return target ? ERR_TRADE_TARGET_MAX_LIMIT_CATEGORY_COUNT_EXCEEDED_IS : ERR_ITEM_MAX_LIMIT_CATEGORY_COUNT_EXCEEDED_IS;
 
         default:
@@ -523,7 +523,7 @@ void CGTradeInfo::SetTradePartner(WOWGUID partner, int32_t suppressMoneyEvent) {
 
             if (item && container) {
                 uint32_t index = 0;
-                CGItem_C* object = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPE_ITEM, __FILE__, __LINE__));
+                CGItem_C* object = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPEMASK_ITEM, __FILE__, __LINE__));
 
                 if (object && object->IsBound()) {
                     index = 6;
@@ -544,12 +544,12 @@ void CGTradeInfo::SetTradePartner(WOWGUID partner, int32_t suppressMoneyEvent) {
 
 // VERIFY: 15291c4e auto
 // OFFSET: 0x005873E0
-void CGTradeInfo::HandleTradeMessage(TRADE_STATUS status, int32_t bagResult, int32_t target, int32_t itemId, uint8_t slot) {
+void CGTradeInfo::HandleTradeMessage(int32_t status, int32_t bagResult, int32_t target, int32_t itemId, uint8_t slot) {
     switch (status) {
-        case TRADE_STATUS_PLAYER_BUSY:
-        case TRADE_STATUS_ALREADY_TRADING:
+        case 0:
+        case 5:
             if (Trade_C_IsTradeRequested()) {
-                CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(Trade_C_GetTradeTarget(), TYPE_PLAYER, __FILE__, __LINE__));
+                CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(Trade_C_GetTradeTarget(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
                 if (unit) {
                     CGGameUI::DisplayError(ERR_PLAYER_BUSY_S, unit->GetUnitName(nullptr, 1));
@@ -558,12 +558,12 @@ void CGTradeInfo::HandleTradeMessage(TRADE_STATUS status, int32_t bagResult, int
 
             break;
 
-        case TRADE_STATUS_PROPOSED:
+        case 1:
             if (!Trade_C_IsTradeRequested()) {
                 if (FriendList::s_friendList->IsIgnored(Trade_C_GetTradeTarget(), true)) {
                     Trade_C_PlayerIgnored();
                 } else {
-                    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(Trade_C_GetTradeTarget(), TYPE_PLAYER, __FILE__, __LINE__));
+                    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(Trade_C_GetTradeTarget(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
                     if (unit) {
                         if (unit->IsDeadOrGhost() || CGGameUI::m_inCinematic || !CGGameUI::m_hasControl || CGAuctionHouse::m_auctioneer) {
@@ -580,48 +580,48 @@ void CGTradeInfo::HandleTradeMessage(TRADE_STATUS status, int32_t bagResult, int
 
             break;
 
-        case TRADE_STATUS_INITIATED:
+        case 2:
             CGTradeInfo::SetTradePartner(Trade_C_GetTradeTarget(), 0);
             break;
 
-        case TRADE_STATUS_CANCELLED:
+        case 3:
             FrameScript_SignalEvent(SCRIPT_EVENT_TRADE_REQUEST_CANCEL, nullptr);
             CGTradeInfo::UnlockTradeItems();
             CGTradeInfo::SetTradePartner(WOWGUID(), 0);
             CGGameUI::DisplayError(ERR_TRADE_CANCELLED);
             break;
 
-        case TRADE_STATUS_ACCEPTED:
+        case 4:
             SetTargetAccepted(1);
             break;
 
-        case TRADE_STATUS_PLAYER_NOT_FOUND:
+        case 6:
             CGGameUI::DisplayError(ERR_GENERIC_NO_TARGET);
             break;
 
-        case TRADE_STATUS_STATE_CHANGED:
+        case 7:
             CGTradeInfo::PlayerAccept();
             break;
 
-        case TRADE_STATUS_COMPLETE:
+        case 8:
             CGTradeInfo::UnlockTradeItems();
             CGTradeInfo::SetTradePartner(WOWGUID(), 1);
             CGGameUI::DisplayError(ERR_TRADE_COMPLETE);
             break;
 
-        case TRADE_STATUS_UNACCEPTED:
+        case 9:
             SetTargetAccepted(0);
             break;
 
-        case TRADE_STATUS_TOO_FAR_AWAY:
+        case 10:
             CGGameUI::DisplayError(ERR_TRADE_TOO_FAR);
             break;
 
-        case TRADE_STATUS_WRONG_FACTION:
+        case 11:
             CGGameUI::DisplayError(ERR_PLAYER_WRONG_FACTION);
             break;
 
-        case TRADE_STATUS_FAILED:
+        case 12:
             CGTradeInfo::UnlockTradeItems();
 
             if (bagResult == 84 && itemId) {
@@ -642,9 +642,9 @@ void CGTradeInfo::HandleTradeMessage(TRADE_STATUS status, int32_t bagResult, int
             CGTradeInfo::SetTradePartner(WOWGUID(), 0);
             break;
 
-        case TRADE_STATUS_PLAYER_IGNORED:
+        case 14:
             if (Trade_C_IsTradeRequested()) {
-                CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(Trade_C_GetTradeTarget(), TYPE_PLAYER, __FILE__, __LINE__));
+                CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(Trade_C_GetTradeTarget(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 
                 if (unit) {
                     CGGameUI::DisplayError(ERR_IGNORING_YOU_S, unit->GetUnitName(nullptr, 1));
@@ -653,40 +653,40 @@ void CGTradeInfo::HandleTradeMessage(TRADE_STATUS status, int32_t bagResult, int
 
             break;
 
-        case TRADE_STATUS_PLAYER_STUNNED:
+        case 15:
             CGGameUI::DisplayError(ERR_GENERIC_STUNNED);
             break;
 
-        case TRADE_STATUS_TARGET_STUNNED:
+        case 16:
             CGGameUI::DisplayError(ERR_TARGET_STUNNED);
             break;
 
-        case TRADE_STATUS_DEAD:
+        case 17:
             CGGameUI::DisplayError(ERR_PLAYER_DEAD);
             break;
 
-        case TRADE_STATUS_TARGET_DEAD:
+        case 18:
             CGGameUI::DisplayError(ERR_TRADE_TARGET_DEAD);
             break;
 
-        case TRADE_STATUS_LOGGING_OUT:
+        case 19:
             CGGameUI::DisplayError(ERR_LOGGING_OUT);
             break;
 
-        case TRADE_STATUS_TARGET_LOGGING_OUT:
+        case 20:
             CGGameUI::DisplayError(ERR_TARGET_LOGGING_OUT);
             break;
 
-        case TRADE_STATUS_RESTRICTED_ACCOUNT:
+        case 21:
             CGGameUI::DisplayError(ERR_RESTRICTED_ACCOUNT);
             break;
 
-        case TRADE_STATUS_WRONG_REALM:
+        case 22:
             CGGameUI::DisplayError(ERR_TRADE_WRONG_REALM);
             CGTradeInfo::DenyPlayerItem(slot);
             break;
 
-        case TRADE_STATUS_NOT_ON_TAPLIST:
+        case 23:
             CGGameUI::DisplayError(ERR_TRADE_NOT_ON_TAPLIST);
             CGTradeInfo::DenyPlayerItem(slot);
             break;
@@ -696,7 +696,7 @@ void CGTradeInfo::HandleTradeMessage(TRADE_STATUS status, int32_t bagResult, int
 // VERIFY: bbebe902 manual
 // OFFSET: 0x005877B0
 bool CGTradeInfo::AddPlayerItem(WOWGUID item, WOWGUID container, uint8_t slot) {
-    CGItem_C* object = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPE_ITEM, __FILE__, __LINE__));
+    CGItem_C* object = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(item, TYPEMASK_ITEM, __FILE__, __LINE__));
     uint32_t index = 0;
 
     if (!object) {
@@ -725,7 +725,7 @@ bool CGTradeInfo::AddPlayerItem(WOWGUID item, WOWGUID container, uint8_t slot) {
         }
     }
 
-    if (object->m_obj->m_type & TYPE_CONTAINER) {
+    if (object->m_obj->m_type & TYPEMASK_CONTAINER) {
         const CGBag_C* bag = object->GetBag();
 
         if (bag) {

@@ -109,11 +109,11 @@ bool ComSat::Manager::SessionGetTalkerByIndex(uint64_t session, int32_t index, u
         if (localTalker >= this->m_maxLocalPlayers) {
             return false;
         }
-        uint64_t guid = this->m_localTalkers[localTalker]->m_guid;
-        if (!guid) {
+        LocalTalker* local = this->m_localTalkers[localTalker];
+        if (!local || !local->m_guid) {
             return false;
         }
-        talker = guid;
+        talker = local->m_guid;
     }
     return true;
 }
@@ -148,8 +148,11 @@ bool ComSat::Manager::MuteTalker(uint8_t localTalker, uint64_t talker, ComSat::M
 // VERIFY: ed19ad38 auto
 // OFFSET: 0x0087FC10
 bool ComSat::Manager::MuteSession(uint8_t localTalker, uint64_t session, ComSat::MuteSetting setting) {
-    if (localTalker < this->m_maxLocalPlayers && this->m_localTalkers[localTalker]->m_guid) {
-        return this->m_soundManager->SetSessionMuted(localTalker, session, setting);
+    if (localTalker < this->m_maxLocalPlayers) {
+        LocalTalker* local = this->m_localTalkers[localTalker];
+        if (local && local->m_guid) {
+            return this->m_soundManager->SetSessionMuted(localTalker, session, setting);
+        }
     }
     return false;
 }
@@ -164,7 +167,8 @@ bool ComSat::Manager::IsSessionMuted(uint8_t localTalker, uint64_t session) {
 // OFFSET: 0x0087FC70
 uint8_t ComSat::Manager::GetLocalTalkerIndex(uint64_t talker) {
     for (uint32_t i = 0; i < this->m_maxLocalPlayers; i++) {
-        if (this->m_localTalkers[i]->m_guid == talker) {
+        LocalTalker* local = this->m_localTalkers[i];
+        if (local && local->m_guid == talker) {
             return i;
         }
     }
@@ -431,7 +435,7 @@ void ComSat::Manager::LocalChatDataReady(uint8_t player, uint8_t* data, uint32_t
         return;
     }
     LocalTalker* localTalker = this->m_localTalkers[player];
-    if (!localTalker->m_guid) {
+    if (!localTalker || !localTalker->m_guid) {
         return;
     }
     if (!size) {
@@ -491,6 +495,9 @@ void ComSat::Manager::LocalTalkerVoiceLevel(uint8_t player, float level, bool ta
 void ComSat::Manager::DeviceError(uint8_t player) {
     if (this->m_callback && player < this->m_maxLocalPlayers) {
         LocalTalker* localTalker = this->m_localTalkers[player];
+        if (!localTalker) {
+            return;
+        }
         if (localTalker->m_guid && localTalker->m_deviceError != true) {
             localTalker->m_deviceError = true;
             this->m_callback->NotifyDeviceError(player);
@@ -553,7 +560,7 @@ bool ComSat::Manager::LocalTalkerDestroy(uint8_t localTalker) {
 bool ComSat::Manager::SessionDestroy(uint64_t session) {
     for (uint8_t i = 0; i < this->m_maxLocalPlayers; i++) {
         LocalTalker* local = this->m_localTalkers[i];
-        if (local->m_guid) {
+        if (local && local->m_guid) {
             ComSat::Session* current = local->m_session;
             if (current && current->m_id == session) {
                 local->m_session = nullptr;
@@ -602,12 +609,15 @@ bool ComSat::Manager::SessionAddRemote(uint64_t session, uint64_t talker, uint8_
         return false;
     }
     for (uint32_t i = 0; i < this->m_maxLocalPlayers; i++) {
-        if (this->m_localTalkers[i]->m_guid == talker) {
+        LocalTalker* local = this->m_localTalkers[i];
+        if (local && local->m_guid == talker) {
             return false;
         }
     }
     ComSat::Network::Address remote;
-    remote.SetAddress(address);
+    if (!remote.SetAddress(address)) {
+        return false;
+    }
     if (!remote.GetPort()) {
         remote.SetPort(this->m_defaultPort);
     }
@@ -657,8 +667,17 @@ ComSat::Manager::Manager(ComSat::Sound::Manager& soundManager, ComSat::Network::
     this->m_localTalkers = nullptr;
     this->m_callback = nullptr;
     this->m_localTalkers = static_cast<LocalTalker**>(this->m_allocator->Alloc(sizeof(LocalTalker*) * this->m_maxLocalPlayers));
+    if (!this->m_localTalkers) {
+        soundManager.SetCallback(this);
+        return;
+    }
     for (uint32_t i = 0; i < this->m_maxLocalPlayers; i++) {
-        this->m_localTalkers[i] = new (this->m_allocator->Alloc(sizeof(LocalTalker))) LocalTalker(*this->m_allocator);
+        void* memory = this->m_allocator->Alloc(sizeof(LocalTalker));
+        if (!memory) {
+            this->m_localTalkers[i] = nullptr;
+            continue;
+        }
+        this->m_localTalkers[i] = new (memory) LocalTalker(*this->m_allocator);
     }
     soundManager.SetCallback(this);
 }
@@ -666,10 +685,12 @@ ComSat::Manager::Manager(ComSat::Sound::Manager& soundManager, ComSat::Network::
 // VERIFY: 27b35473 manual
 // OFFSET: [0x00881150, 0x00881250]
 ComSat::Manager::~Manager() {
-    for (uint32_t i = 0; i < this->m_maxLocalPlayers; i++) {
-        if (this->m_localTalkers[i]) {
-            ComSat::Delete(*this->m_allocator, this->m_localTalkers[i]);
-            this->m_localTalkers[i] = nullptr;
+    if (this->m_localTalkers) {
+        for (uint32_t i = 0; i < this->m_maxLocalPlayers; i++) {
+            if (this->m_localTalkers[i]) {
+                ComSat::Delete(*this->m_allocator, this->m_localTalkers[i]);
+                this->m_localTalkers[i] = nullptr;
+            }
         }
     }
     if (this->m_localTalkers) {
@@ -702,6 +723,9 @@ bool ComSat::Manager::LocalTalkerSelectSession(uint8_t localTalker, uint64_t ses
         return false;
     }
     LocalTalker* local = this->m_localTalkers[localTalker];
+    if (!local || !local->m_guid) {
+        return false;
+    }
     if (local->m_session && local->m_session->m_id == session) {
         return true;
     }
@@ -727,7 +751,8 @@ bool ComSat::Manager::SessionRemove(uint64_t session, uint64_t talker) {
     }
     uint8_t localTalker = 0xFF;
     for (uint32_t i = 0; i < this->m_maxLocalPlayers; i++) {
-        if (this->m_localTalkers[i]->m_guid == talker) {
+        LocalTalker* local = this->m_localTalkers[i];
+        if (local && local->m_guid == talker) {
             localTalker = i;
         }
     }
@@ -738,7 +763,7 @@ bool ComSat::Manager::SessionRemove(uint64_t session, uint64_t talker) {
     bool unused = true;
     for (uint32_t i = 0; i < this->m_maxLocalPlayers; i++) {
         LocalTalker* local = this->m_localTalkers[i];
-        if (local->m_guid) {
+        if (local && local->m_guid) {
             if (local->m_guid == talker) {
                 local->m_sessions.Remove(session);
             } else {
@@ -791,17 +816,20 @@ bool ComSat::Manager::SessionAddLocal(uint64_t session, uint8_t localTalker, uin
         return false;
     }
     LocalTalker* local = this->m_localTalkers[localTalker];
+    if (!local) {
+        return false;
+    }
     if (!local->m_guid) {
         local->m_guid = talker;
     }
-    ComSat::Vector<uint64_t>& sessions = this->m_localTalkers[localTalker]->m_sessions;
+    ComSat::Vector<uint64_t>& sessions = local->m_sessions;
     uint32_t index = 0;
     if (!sessions.Find(session, index)) {
         sessions.PushBack(session);
     }
     current->LocalAdd(talker);
     bool result = this->m_soundManager->RegisterLocalTalkerForSession(session, localTalker);
-    if (result && !this->m_localTalkers[localTalker]->m_session) {
+    if (result && !local->m_session) {
         this->LocalTalkerSelectSession(localTalker, session);
     }
     return result;

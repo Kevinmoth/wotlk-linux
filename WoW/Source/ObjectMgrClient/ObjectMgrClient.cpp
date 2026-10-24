@@ -73,6 +73,9 @@ uint32_t s_objTotalSize[NUM_CLIENT_OBJECT_TYPES] = {
 // OFFSET: 0x004D5850
 static CMirrorHandler* AssignMirrorHandler(TSList<CMirrorHandler, TSGetLink<CMirrorHandler> >* list, uint32_t fieldByteOffset, uint32_t mirrorByteOffset, uint32_t fieldByteSize, MIRRORHANDLERFUNC function, void* param, HANDLER_PRIORITY priority, int32_t alwaysFire) {
     CMirrorHandler* handler = list->NewNode(2, 0, 0);
+    if (!handler) {
+        return nullptr;
+    }
     handler->m_fieldByteOffset = fieldByteOffset;
     handler->m_mirrorByteOffset = mirrorByteOffset;
     handler->m_fieldByteSize = fieldByteSize;
@@ -210,7 +213,7 @@ WOWGUID ClntObjMgrGetActivePlayer() {
 
 // VERIFY: 60136c4f manual
 // OFFSET: 0x004D4DB0
-CGObject_C* ClntObjMgrObjectPtr(WOWGUID guid, OBJECT_TYPE mask, const char* fileName, int32_t lineNumber) {
+CGObject_C* ClntObjMgrObjectPtr(WOWGUID guid, TypeMask mask, const char* fileName, int32_t lineNumber) {
     ObjectMgr* mgr = s_curMgr;
 
     if (!mgr || !guid) {
@@ -340,8 +343,8 @@ void ClntObjMgrUnsetTypeMirrorHandler(OBJECT_TYPE_ID typeId, uint32_t fieldOffse
 // OFFSET: 0x004D3C40
 static OBJECT_TYPE_ID IncTypeId(CGObject_C* object, OBJECT_TYPE_ID typeId) {
     switch (object->m_obj->m_type) {
-        case HEIR_TYPE_ITEM:
-        case HEIR_TYPE_CONTAINER: {
+        case TYPEMASK_OBJECT | TYPEMASK_ITEM:
+        case TYPEMASK_OBJECT | TYPEMASK_ITEM | TYPEMASK_CONTAINER: {
             if (typeId == ID_OBJECT) {
                 return ID_ITEM;
             }
@@ -353,8 +356,8 @@ static OBJECT_TYPE_ID IncTypeId(CGObject_C* object, OBJECT_TYPE_ID typeId) {
             break;
         }
 
-        case HEIR_TYPE_UNIT:
-        case HEIR_TYPE_PLAYER: {
+        case TYPEMASK_OBJECT | TYPEMASK_UNIT:
+        case TYPEMASK_OBJECT | TYPEMASK_UNIT | TYPEMASK_PLAYER: {
             if (typeId == ID_OBJECT) {
                 return ID_UNIT;
             }
@@ -366,7 +369,7 @@ static OBJECT_TYPE_ID IncTypeId(CGObject_C* object, OBJECT_TYPE_ID typeId) {
             break;
         }
 
-        case HEIR_TYPE_GAMEOBJECT: {
+        case TYPEMASK_OBJECT | TYPEMASK_GAMEOBJECT: {
             if (typeId == ID_OBJECT) {
                 return ID_GAMEOBJECT;
             }
@@ -374,7 +377,7 @@ static OBJECT_TYPE_ID IncTypeId(CGObject_C* object, OBJECT_TYPE_ID typeId) {
             break;
         }
 
-        case HEIR_TYPE_DYNAMICOBJECT: {
+        case TYPEMASK_OBJECT | TYPEMASK_DYNAMICOBJECT: {
             if (typeId == ID_OBJECT) {
                 return ID_DYNAMICOBJECT;
             }
@@ -382,7 +385,7 @@ static OBJECT_TYPE_ID IncTypeId(CGObject_C* object, OBJECT_TYPE_ID typeId) {
             break;
         }
 
-        case HEIR_TYPE_CORPSE: {
+        case TYPEMASK_OBJECT | TYPEMASK_CORPSE: {
             if (typeId == ID_OBJECT) {
                 return ID_CORPSE;
             }
@@ -459,35 +462,35 @@ static TSList<CMirrorHandler, TSGetLink<CMirrorHandler> >* GetObjectMirrorList(O
 // OFFSET: 0x004D3DF0
 static uint32_t GetNumDwordBlocks(uint32_t type, WOWGUID guid) {
     switch (type) {
-        case HEIR_TYPE_OBJECT: {
+        case TYPEMASK_OBJECT: {
             return 6;
         }
 
-        case HEIR_TYPE_ITEM: {
+        case TYPEMASK_OBJECT | TYPEMASK_ITEM: {
             return 64;
         }
 
-        case HEIR_TYPE_CONTAINER: {
+        case TYPEMASK_OBJECT | TYPEMASK_ITEM | TYPEMASK_CONTAINER: {
             return 138;
         }
 
-        case HEIR_TYPE_UNIT: {
+        case TYPEMASK_OBJECT | TYPEMASK_UNIT: {
             return 148;
         }
 
-        case HEIR_TYPE_PLAYER: {
+        case TYPEMASK_OBJECT | TYPEMASK_UNIT | TYPEMASK_PLAYER: {
             return guid == ClntObjMgrGetActivePlayer() ? 1326 : 324;
         }
 
-        case HEIR_TYPE_GAMEOBJECT: {
+        case TYPEMASK_OBJECT | TYPEMASK_GAMEOBJECT: {
             return 18;
         }
 
-        case HEIR_TYPE_DYNAMICOBJECT: {
+        case TYPEMASK_OBJECT | TYPEMASK_DYNAMICOBJECT: {
             return 12;
         }
 
-        case HEIR_TYPE_CORPSE: {
+        case TYPEMASK_OBJECT | TYPEMASK_CORPSE: {
             return 36;
         }
 
@@ -593,14 +596,14 @@ static void DestroyRemovedObject(CGObject_C* object) {
     int32_t activePlayer = object->m_obj->m_guid == ClntObjMgrGetActivePlayer();
 
     switch (object->m_obj->m_type) {
-        case HEIR_TYPE_OBJECT:
-        case HEIR_TYPE_ITEM:
-        case HEIR_TYPE_CONTAINER:
-        case HEIR_TYPE_UNIT:
-        case HEIR_TYPE_PLAYER:
-        case HEIR_TYPE_GAMEOBJECT:
-        case HEIR_TYPE_DYNAMICOBJECT:
-        case HEIR_TYPE_CORPSE: {
+        case TYPEMASK_OBJECT:
+        case TYPEMASK_OBJECT | TYPEMASK_ITEM:
+        case TYPEMASK_OBJECT | TYPEMASK_ITEM | TYPEMASK_CONTAINER:
+        case TYPEMASK_OBJECT | TYPEMASK_UNIT:
+        case TYPEMASK_OBJECT | TYPEMASK_UNIT | TYPEMASK_PLAYER:
+        case TYPEMASK_OBJECT | TYPEMASK_GAMEOBJECT:
+        case TYPEMASK_OBJECT | TYPEMASK_DYNAMICOBJECT:
+        case TYPEMASK_OBJECT | TYPEMASK_CORPSE: {
             object->~CGObject_C();
             break;
         }
@@ -1187,8 +1190,8 @@ static int32_t PostInitObject(uint32_t time, CDataStore* msg, bool reenable) {
         return 0;
     }
 
-    if ((object->m_modelFlags & 0x20000) && (object->m_obj->m_type & TYPE_UNIT)) {
-      static_cast<CGUnit_C*>(object)->SetClientInitData(create, object->m_obj->m_guid == ClntObjMgrGetActivePlayer());
+    if ((object->m_modelFlags & 0x20000) && (object->m_obj->m_type & TYPEMASK_UNIT)) {
+        static_cast<CGUnit_C*>(object)->SetClientInitData(create, object->m_obj->m_guid == ClntObjMgrGetActivePlayer());
     }
 
     if (object->m_modelFlags & 0x40000) {
@@ -1689,7 +1692,7 @@ int32_t Packet_SMSG_DESTROY_OBJECT(void* param, NETMESSAGE msgId, uint32_t time,
         return 1;
     }
 
-    if (death && (object->m_obj->m_type & TYPE_UNIT) && static_cast<CGUnit_C*>(object)->m_unit->m_unitFieldHealth > 0) {
+    if (death && (object->m_obj->m_type & TYPEMASK_UNIT) && static_cast<CGUnit_C*>(object)->m_unit->m_unitFieldHealth > 0) {
         static_cast<CGUnit_C*>(object)->OnDeath();
     }
 
@@ -1761,6 +1764,6 @@ CMirrorHandler::~CMirrorHandler() {
 // VERIFY: 7a5ce34e manual
 // OFFSET: 0x004038F0
 CGPlayer_C* ClntObjMgrGetActivePlayerObj() {
-    return static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
+    return static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
 }
 

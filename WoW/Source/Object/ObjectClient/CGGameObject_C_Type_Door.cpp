@@ -1,4 +1,3 @@
-#include "WoW/Source/Ui/Types.h"
 #include "CGGameObject_C_Type_Door.h"
 #include "WoW/Source/Object/GameObjectDef.h"
 #include "WoW/Source/Object/GameObjectStats.h"
@@ -6,7 +5,7 @@
 // VERIFY: c0423e81 auto
 // OFFSET: 0x00712520
 CGGameObject_C_Type_Door::CGGameObject_C_Type_Door(CGGameObject_C* owner) : CGGameObject_C_TypeAnimated(owner) {
-    this->m_useErrorType = ERR_DOOR_LOCKED;
+    this->m_useErrorType = 235;
 }
 
 // VERIFY: cfff901d auto
@@ -52,7 +51,7 @@ bool CGGameObject_C_Type_Door::CanUseNow(GAME_ERROR_TYPE* error, float* distance
     }
 
     if (error) {
-        *error = static_cast<GAME_ERROR_TYPE>(ERR_USE_OBJECT_MOVING);
+        *error = static_cast<GAME_ERROR_TYPE>(242);
     }
 
     return false;

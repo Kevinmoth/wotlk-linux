@@ -500,22 +500,22 @@ void CKBPage::Initialize() {
 // OFFSET: 0x00550940
 const char* KnowledgeBaseGetURLForLocale() {
     switch (LocaleNameToIndex(s_localeCode)) {
-        case DB_LOCALE_deDE:
-        case DB_LOCALE_enGB:
-        case DB_LOCALE_esES:
-        case DB_LOCALE_frFR:
-        case DB_LOCALE_ruRU:
+        case 0:
+        case 1:
+        case 3:
+        case 4:
+        case 11:
             return "http://support.wow-europe.com/kb/";
 
-        case DB_LOCALE_koKR:
+        case 5:
             return "http://support.worldofwarcraft.co.kr/kb/";
 
-        case DB_LOCALE_zhCN:
-        case DB_LOCALE_enCN:
+        case 6:
+        case 8:
             return "http://cn.kbase.blizzard.com/kb/wow/";
 
-        case DB_LOCALE_zhTW:
-        case DB_LOCALE_enTW:
+        case 7:
+        case 9:
             return "http://support.wowtaiwan.com.tw/kb/";
 
         default:

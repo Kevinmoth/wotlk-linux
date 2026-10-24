@@ -151,7 +151,7 @@ void CSimpleFont::UpdateObjects() {
         fontable->FontObjectUpdated(this->m_attributes);
     }
 
-    this->m_attributes.m_flags &= ~FLAG_COMPLETE_UPDATE;
+    this->m_attributes.m_flags &= ~0x1Fu;
 }
 
 // VERIFY: de3bab57 manual
@@ -246,6 +246,12 @@ void CSimpleFont::LoadXML(XMLNode* node, CStatus* status) {
 
             if (monochrome && *monochrome && StringToBOOL(monochrome)) {
                 fontFlags |= 2;
+            }
+
+            const char* msdf = node->GetAttributeByName("msdf");
+
+            if (msdf && *msdf && StringToBOOL(msdf)) {
+                fontFlags |= 0x8;
             }
 
             if (this->m_attributes.SetFont(fontName, fontHeight, fontFlags)) {

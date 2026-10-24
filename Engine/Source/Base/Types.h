@@ -19,13 +19,11 @@ enum CMDOPT {
     CMD_DEMODETAIL = 11,
     CMD_DEMOSOUND = 12,
     CMD_FULL_SCREEN = 13,
+    CMD_VULKAN = 17,
     CMD_22050HZ = 14,
     CMD_NO_WARNINGS = 15,
-    CMDOPTS = 16,
-    // Not in the 3.3.5a binary: "-vulkan" selects the Vulkan backend like "-opengl" / "-d3d" select theirs.
-    // Past every id the client registers (WOWCMDOPT in WoW/Source/Client.h ends at CMD_GX_OVERRIDE = 39):
-    // SCmd keys its arguments on the id, so a reused value would alias another option.
-    CMD_VULKAN = 40,
+    CMD_AUTOLOGIN = 16,
+    CMDOPTS = 17,
 };
 
 enum PROPERTY {
@@ -52,19 +50,12 @@ enum PROPERTY {
 };
 
 enum STATUS_TYPE {
-    SYSMSG_INFO = 0,
-    SYSMSG_WARNING = 1,
-    SYSMSG_ERROR = 2,
-    SYSMSG_FATAL = 3,
-    SYSMSG_NUMTYPES = 4,
     STATUS_INFO = 0,
     STATUS_WARNING = 1,
     STATUS_ERROR = 2,
     STATUS_FATAL = 3,
     STATUS_NUMTYPES = 4,
 };
-
-using SYSMSG_TYPE = STATUS_TYPE;
 
 struct HOBJECT__ {
     /* 0000 */ int32_t m_unused;

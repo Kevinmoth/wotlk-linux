@@ -2,7 +2,6 @@
 #define WOW_SOURCE_UIUTIL_CURSOR_H
 
 #include <cstdint>
-#include "WoW/Source/UIUtil/Types.h"
 #include "WoW/Source/Object/WGUID.h"
 
 struct MipBits;
@@ -13,11 +12,11 @@ void CursorDestroy();
 
 void CursorReleaseItemMips();
 void CursorSetHeldItem(WOWGUID item);
-CURSORMODE CursorGetResetMode();
+uint32_t CursorGetResetMode();
 void CursorResetMode();
-void CursorSetMode(CURSORMODE mode);
-void CursorSetResetMode(CURSORMODE mode);
-CURSORMODE CursorGetModeFromName(const char* name);
+void CursorSetMode(uint32_t mode);
+void CursorSetResetMode(uint32_t mode);
+uint32_t CursorGetModeFromName(const char* name);
 int32_t CursorSetFromName(const char* name);
 void CursorDropItem();
 void UpdateCursor();

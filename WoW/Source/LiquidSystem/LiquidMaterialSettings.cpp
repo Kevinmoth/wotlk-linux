@@ -7,10 +7,6 @@
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/Tempest/CMath.h"
 
-enum LiquidTextureCounts : uint32_t {
-    NUM_LIQUID_TEX_FRAMES = 30,
-};
-
 // VERIFY: c119ee84 auto
 // OFFSET: 0x008A16C0
 int32_t Liquid::CMaterialSettings::GetInt(uint32_t index) const {
@@ -138,7 +134,7 @@ void Liquid::CMaterialSettings::InitTexture() {
             char fileName[128];
             int32_t hasBlob = 0;
 
-            for (uint32_t frame = 1; frame <= NUM_LIQUID_TEX_FRAMES; frame++) {
+            for (uint32_t frame = 1; frame <= 30; frame++) {
                 SStrPrintf(fileName, sizeof(fileName), name, frame);
                 CTexture* texture = TextureCreate(fileName, flags, &status, 0);
                 this->m_textures[i].New(texture);
@@ -149,7 +145,7 @@ void Liquid::CMaterialSettings::InitTexture() {
             }
 
             if (hasBlob) {
-                for (uint32_t frame = 1; frame <= NUM_LIQUID_TEX_FRAMES; frame++) {
+                for (uint32_t frame = 1; frame <= 30; frame++) {
                     SStrPrintf(fileName, sizeof(fileName), name, frame);
                     CTexture* texture = TextureCreateBlob(fileName, flags, &status, 1);
 

@@ -495,6 +495,10 @@ int32_t WowConnection::Release() {
 // VERIFY: 5d8f334b auto
 // OFFSET: 0x00468250
 void WowConnection::DoDisconnect() {
+    if (!WowConnection::s_network) {
+        return;
+    }
+
     this->m_lock.Enter();
 
     if (this->m_sock >= 0) {
@@ -566,6 +570,23 @@ void WowConnection::DoExceptions() {
 bool WowConnection::Connect(uint32_t address, uint16_t port, int32_t timeout) {
     this->m_connectAddress = address;
     this->m_connectPort = port;
+
+    if (!address) {
+        this->SetState(WOWC_ERROR);
+        this->AddRef();
+        this->AcquireResponseRef();
+
+        WowConnectionResponse* response = this->m_response;
+
+        if (response) {
+            response->WCCantConnect(this, OsGetAsyncTimeMs(), &this->m_peer);
+        }
+
+        this->ReleaseResponseRef();
+        this->Release();
+        return true;
+    }
+
     this->StartConnect();
 
     return true;
@@ -600,7 +621,13 @@ int32_t WowConnection::InitOsNet(bool (*netAddrFilter)(const NETADDR* addr), voi
             numThreads = 32;
         }
 
-        WowConnection::s_network = new (SMemAlloc(sizeof(WowConnectionNet), __FILE__, __LINE__, 0)) WowConnectionNet(numThreads, threadInit);
+        void* mem = SMemAlloc(sizeof(WowConnectionNet), __FILE__, __LINE__, 0);
+
+        if (!mem) {
+            return 0;
+        }
+
+        WowConnection::s_network = new (mem) WowConnectionNet(numThreads, threadInit);
         WowConnection::s_network->PlatformInit(useEngine);
         WowConnection::s_network->Start();
     }
@@ -615,7 +642,73 @@ bool WowConnection::Connect(const char* address, int32_t timeout) {
     const char* separator = SStrChr(address, ':');
 
     if (separator) {
-        this->m_connectPort = SStrToInt(separator + 1);
+        if (separator[1] == '\0') {
+            this->m_connectAddress = 0;
+            this->m_connectPort = 0;
+            this->SetState(WOWC_ERROR);
+            this->AddRef();
+            this->AcquireResponseRef();
+
+            WowConnectionResponse* response = this->m_response;
+
+            if (response) {
+                response->WCCantConnect(this, OsGetAsyncTimeMs(), &this->m_peer);
+            }
+
+            this->ReleaseResponseRef();
+            this->Release();
+            return true;
+        }
+
+        const char* portText = separator + 1;
+
+        for (const char* digit = portText; *digit; ++digit) {
+            if (*digit < '0' || *digit > '9') {
+                this->m_connectAddress = 0;
+                this->m_connectPort = 0;
+                this->SetState(WOWC_ERROR);
+                this->AddRef();
+                this->AcquireResponseRef();
+
+                WowConnectionResponse* response = this->m_response;
+
+                if (response) {
+                    response->WCCantConnect(this, OsGetAsyncTimeMs(), &this->m_peer);
+                }
+
+                this->ReleaseResponseRef();
+                this->Release();
+                return true;
+            }
+        }
+
+        uint32_t portValue = 0;
+
+        for (const char* digit = portText; *digit; ++digit) {
+            uint32_t next = static_cast<uint32_t>(*digit - '0');
+
+            if (portValue > 6553u || (portValue == 6553u && next > 5u)) {
+                this->m_connectAddress = 0;
+                this->m_connectPort = 0;
+                this->SetState(WOWC_ERROR);
+                this->AddRef();
+                this->AcquireResponseRef();
+
+                WowConnectionResponse* response = this->m_response;
+
+                if (response) {
+                    response->WCCantConnect(this, OsGetAsyncTimeMs(), &this->m_peer);
+                }
+
+                this->ReleaseResponseRef();
+                this->Release();
+                return true;
+            }
+
+            portValue = portValue * 10u + next;
+        }
+
+        this->m_connectPort = static_cast<uint16_t>(portValue);
 
         uint32_t length = separator - address + 1;
 
@@ -625,7 +718,8 @@ bool WowConnection::Connect(const char* address, int32_t timeout) {
 
         SStrCopy(host, address, length);
     } else {
-        this->m_connectPort = 0;
+        // ʕ •ᴥ•ʔ✿ realmlist.wtf is often just the host. Auth is 3724. ✿ ʕ •ᴥ•ʔ
+        this->m_connectPort = 3724;
         SStrCopy(host, address, sizeof(host));
     }
 

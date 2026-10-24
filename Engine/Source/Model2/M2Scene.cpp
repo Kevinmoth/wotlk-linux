@@ -3,11 +3,19 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <vector>
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+#include "ThirdParty/sse2neon/sse2neon.h"
+#else
 #include <xmmintrin.h>
+#endif
 #include "Engine/Source/Model2/M2Scene.h"
+#include "Engine/Source/Base/Job/JobSystem.h"
+#include "Engine/Source/Base/Profiler.h"
 #include "Engine/Source/Base/ObjectAlloc.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Model2/M2Cache.h"
+#include "Engine/Source/Os/Processor.h"
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/Model2/M2Model.h"
 #include "Engine/Source/Model2/M2Shared.h"
@@ -23,10 +31,10 @@
 #include "Engine/Source/Tempest/NTempest.h"
 
 // STATIC: 0x00A45374
-const uint32_t s_localLighting[M2BLEND_COUNT] = { 1, 1, 1, 1, 1, 0, 0 };
+const uint32_t s_localLighting[7] = { 1, 1, 1, 1, 1, 0, 0 };
 
 // STATIC: 0x00A453B0
-const uint32_t s_blendModes[3][M2BLEND_COUNT] = { { 0, 1, 2, 10, 3, 4, 5 }, { 2, 2, 2, 10, 3, 4, 5 }, { 2, 2, 2, 10, 3, 4, 5 } };
+const uint32_t s_blendModes[3][7] = { { 0, 1, 2, 10, 3, 4, 5 }, { 2, 2, 2, 10, 3, 4, 5 }, { 2, 2, 2, 10, 3, 4, 5 } };
 
 // STATIC: 0x00AF5898
 uint32_t CM2Scene::s_optFlags = 0xFFFFFFFF;
@@ -78,19 +86,19 @@ void CM2Scene::SetFloat18(float value) {
 uint32_t ParticleBlendToM2Blend(uint32_t blend) {
     switch (blend) {
         case 1:
-            return M2BLEND_ALPHA_KEY;
+            return 1;
         case 2:
-            return M2BLEND_ALPHA;
+            return 2;
         case 3:
-            return M2BLEND_ADD;
+            return 4;
         case 4:
-            return M2BLEND_MOD;
+            return 5;
         case 5:
-            return M2BLEND_MOD2X;
+            return 6;
         case 10:
-            return M2BLEND_NO_ALPHA_ADD;
+            return 3;
         default:
-            return M2BLEND_OPAQUE;
+            return 0;
     }
 }
 
@@ -197,21 +205,8 @@ void CM2Scene::SetProjectTextureCallback(void (*callback)(const CAaBox&, const C
 // OFFSET: 0x0081CC50
 static uint32_t __stdcall HashDoodadElement(const M2Element* element) {
     const CM2Model* model = element->m_model;
-    const CM2Lighting* lighting = model->m_currentLighting;
-    uint32_t colorIndex = element->m_batch->m_colorIndex;
-
-    const uint32_t* light = reinterpret_cast<const uint32_t*>(lighting);
-    uint32_t hash = light[23] + 19 * (light[22] + 19 * (light[21] + 19 * (light[26] + 19 * (light[25] + 19 * (19 * (light[48] + 19 * (light[47] + 19 * (19 * (light[43] + 19 * (light[42] + 19 * (element->m_index + 19 * static_cast<uint32_t>(reinterpret_cast<uintptr_t>(model->m_shared))))) + light[46]))) + light[24])))));
-
-    if (colorIndex < model->m_shared->m_data->m_colors.m_count) {
-        const uint32_t* color = reinterpret_cast<const uint32_t*>(&model->m_colors[colorIndex].m_colorTrack.m_currentValue);
-        hash = color[2] + 19 * (color[1] + 19 * (19 * hash + color[0]));
-    }
-
-    const uint32_t* diffuse = reinterpret_cast<const uint32_t*>(&model->m_diffuseColor);
-    const uint32_t* emissive = reinterpret_cast<const uint32_t*>(&model->m_emissiveColor);
-
-    return reinterpret_cast<const uint32_t*>(&model->unk_01B8)[0] + 19 * (emissive[2] + 19 * (emissive[1] + 19 * (19 * (diffuse[2] + 19 * (diffuse[1] + 19 * (19 * hash + diffuse[0]))) + emissive[0])));
+    // ʕ •ᴥ•ʔ✿ Same mesh section shares one draw. Per-copy light bits were splitting every tree into its own call ✿ ʕ •ᴥ•ʔ
+    return static_cast<uint32_t>(element->m_index) + 19u * static_cast<uint32_t>(reinterpret_cast<uintptr_t>(model->m_shared));
 }
 
 // VERIFY: 3a0615ca auto
@@ -230,26 +225,25 @@ CM2Model* CM2ModelHeap::New() {
     return model;
 }
 
-// VERIFY: f41c995e auto
-// OFFSET: 0x0081CE70
-void CM2Scene::AnimateThread(void* param) {
-    CM2Scene* scene = static_cast<CM2Scene*>(param);
+struct M2AnimateBatch {
+    const C44Matrix* view;
+    CM2Model** models;
+};
 
-    for (CM2Model* model = scene->m_animateList; model; model = model->m_animateNext) {
-        model = model->m_animateNext;
+static std::vector<CM2Model*> s_animateRoots;
 
-        if (!model) {
-            break;
-        }
+static void AnimateModelRange(Job::Range range, void* user) {
+    M2AnimateBatch* batch = static_cast<M2AnimateBatch*>(user);
+    const C3Vector diffuse(1.0f, 1.0f, 1.0f);
+    const C3Vector emissive(0.0f, 0.0f, 0.0f);
 
-        if (model->m_attachParent) {
-            continue;
-        }
+    for (uint32_t index = range.begin; index < range.end; index++) {
+        CM2Model* model = batch->models[index];
 
         if (model->m_fFlags & 0x1000) {
-            model->AnimateMTSimple(&scene->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
+            model->AnimateMTSimple(batch->view, diffuse, emissive, 1.0f, 1.0f);
         } else {
-            model->AnimateMT(&scene->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
+            model->AnimateMT(batch->view, diffuse, emissive, 1.0f, 1.0f);
         }
     }
 }
@@ -508,7 +502,15 @@ void CM2Scene::TransformHitTestVerticesBlendSSE(const CM2Model* model, const M2S
         if (*reinterpret_cast<uint32_t*>(&vertex->m_weights) != weights || *reinterpret_cast<uint32_t*>(&vertex->m_indices) != indices) {
             weights = *reinterpret_cast<uint32_t*>(&vertex->m_weights);
             indices = *reinterpret_cast<uint32_t*>(&vertex->m_indices);
+#if defined(WOWDECOMP_AVX2_SKIN)
+            if (OsHasAvx2()) {
+                M2BlendBoneMatricesAVX2(model->m_boneMatrices, vertex->m_weights, vertex->m_indices, &matrix);
+            } else {
+                M2BlendBoneMatricesSSE(model->m_boneMatrices, vertex->m_weights, vertex->m_indices, &matrix);
+            }
+#else
             M2BlendBoneMatricesSSE(model->m_boneMatrices, vertex->m_weights, vertex->m_indices, &matrix);
+#endif
         }
 
         C3Vector p = vertex->m_position * matrix;
@@ -603,7 +605,7 @@ M2HitRec* CM2Scene::HitTestGeometry(const CM2Model* model, uint32_t pass, const 
 
         M2Material* material = &data->m_materials[batch->m_materialIndex];
 
-        if (model->m_hitTestMode == 2 && material->m_blendMode == M2BLEND_OPAQUE) {
+        if (model->m_hitTestMode == 2 && !material->m_blendMode) {
             continue;
         }
 
@@ -1464,9 +1466,9 @@ void __stdcall CM2Scene::ComputeElementShaders(M2Element* element) {
     uint32_t boneInfluences = element->m_skinSection->m_boneInfluences;
     int32_t alphaTest;
 
-    if (material->m_blendMode == M2BLEND_OPAQUE) {
+    if (!material->m_blendMode) {
         alphaTest = 0;
-    } else if (material->m_blendMode == M2BLEND_ALPHA_KEY) {
+    } else if (material->m_blendMode == 1) {
         alphaTest = static_cast<int32_t>(element->m_alpha * 224.0f);
     } else {
         alphaTest = 1;
@@ -1564,7 +1566,7 @@ void CM2Scene::SortAdditiveParticleElements(uint32_t pass) {
     for (uint32_t i = 0; i < list.m_count; i++) {
         M2Element* element = &this->m_elements.m_data[list.m_data[i]];
         M2Data* data = element->m_model->m_shared->m_data;
-        uint32_t blend = M2BLEND_OPAQUE;
+        uint32_t blend = 0;
 
         switch (element->m_type) {
             case 0:
@@ -1576,7 +1578,7 @@ void CM2Scene::SortAdditiveParticleElements(uint32_t pass) {
                 blend = data->m_materials[data->m_ribbons[element->m_index].m_materialIndices[0]].m_blendMode;
                 break;
             case 4:
-                blend = (this->m_cache->m_flags & 0x100) ? M2BLEND_ADD : ParticleBlendToM2Blend(element->m_emitter->m_params.m_materialBlend);
+                blend = (this->m_cache->m_flags & 0x100) ? 4 : ParticleBlendToM2Blend(element->m_emitter->m_params.m_materialBlend);
                 break;
             default:
                 break;
@@ -1638,13 +1640,38 @@ CM2Scene::~CM2Scene() {
     delete[] this->m_hitVerts;
 }
 
+template <class T>
+static void ReserveDoubling(TSGrowableArray<T>& list, uint32_t extra) {
+    uint32_t need = list.m_count + extra;
+
+    if (need <= list.m_alloc) {
+        return;
+    }
+
+    uint32_t alloc = list.m_alloc < 256 ? 256 : list.m_alloc;
+
+    while (alloc < need) {
+        uint32_t next = alloc << 1;
+
+        if (next < alloc) {
+            alloc = need;
+            break;
+        }
+
+        alloc = next;
+    }
+
+    list.Reserve(alloc - list.m_count, 0);
+}
+
 // VERIFY: 7bb79c57 manual
 // OFFSET: 0x00821930
 M2Element* CM2Scene::AddParticleElement(CParticleEmitter2* emitter, CM2Model* model, float depth, float alpha, int32_t split, uint32_t& index, uint32_t& additiveCount) {
-    if (!emitter->HasLiveParticles() || emitter->m_params.m_hasModel == CParticleEmitter2::PT_MODEL) {
+    if (!emitter->HasLiveParticles() || emitter->m_params.m_hasModel == 1) {
         return nullptr;
     }
 
+    ReserveDoubling(this->m_elements, 1);
     M2Element* element = this->m_elements.New();
 
     if (!element) {
@@ -1672,8 +1699,10 @@ M2Element* CM2Scene::AddParticleElement(CParticleEmitter2* emitter, CM2Model* mo
 
     if (blend > 1 || alpha < 0.99998999f) {
         TSGrowableArray<uint32_t>* list = (!split || (emitter->m_flags & 0x40000)) ? &this->m_passElements[2] : &this->m_passElements[1];
+        ReserveDoubling(*list, 1);
         list->New(index);
     } else {
+        ReserveDoubling(this->m_passElements[0], 1);
         this->m_passElements[0].New(index);
     }
 
@@ -1682,8 +1711,375 @@ M2Element* CM2Scene::AddParticleElement(CParticleEmitter2* emitter, CM2Model* mo
     return element;
 }
 
+struct SkinKey {
+    CM2Model* model;
+    M2SkinSection* section;
+    int32_t texCoord;
+    int32_t optimized;
+
+    bool operator==(const SkinKey& other) const {
+        return this->model == other.model && this->section == other.section && this->texCoord == other.texCoord && this->optimized == other.optimized;
+    }
+};
+
+struct SkinJob {
+    CM2Model* model;
+    M2SkinSection* section;
+    int32_t texCoord;
+    int32_t optimized;
+    uint32_t offset;
+    uint32_t bytes;
+};
+
+struct SkinHashEnt {
+    uint32_t stamp;
+    uint32_t job;
+};
+
+static std::vector<SkinJob> s_skinJobs;
+static std::vector<uint8_t> s_skinBytes;
+// -- ʕ •ᴥ•ʔ✿ Stamp bumps each frame so the bucket storage stays put ✿ ʕ •ᴥ•ʔ
+static std::vector<SkinHashEnt> s_skinHash;
+static uint32_t s_skinStamp = 0;
+static uint32_t s_skinUsed = 0;
+static int32_t s_skinReady = 0;
+
+static size_t SkinKeyHashValue(const SkinKey& key) {
+    size_t hash = reinterpret_cast<uintptr_t>(key.model);
+    hash ^= reinterpret_cast<uintptr_t>(key.section) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+    hash ^= static_cast<size_t>(key.texCoord) << 1;
+    hash ^= static_cast<size_t>(key.optimized);
+    return hash;
+}
+
+static void SkinLookupClear() {
+    ++s_skinStamp;
+
+    if (s_skinStamp != 0u) {
+        return;
+    }
+
+    if (!s_skinHash.empty()) {
+        memset(s_skinHash.data(), 0, s_skinHash.size() * sizeof(SkinHashEnt));
+    }
+
+    s_skinStamp = 1u;
+}
+
+static void SkinRehash(size_t buckets) {
+    s_skinHash.assign(buckets, SkinHashEnt{ 0u, 0u });
+    size_t mask = buckets - 1u;
+
+    for (size_t j = 0; j < s_skinJobs.size(); ++j) {
+        SkinKey key = { s_skinJobs[j].model, s_skinJobs[j].section, s_skinJobs[j].texCoord, s_skinJobs[j].optimized };
+        size_t i = SkinKeyHashValue(key) & mask;
+
+        while (s_skinHash[i].stamp == s_skinStamp) {
+            i = (i + 1u) & mask;
+        }
+
+        s_skinHash[i].stamp = s_skinStamp;
+        s_skinHash[i].job = static_cast<uint32_t>(j);
+    }
+}
+
+static uint32_t SkinLookupJob(const SkinKey& key) {
+    if (s_skinHash.empty()) {
+        return 0xffffffffu;
+    }
+
+    size_t mask = s_skinHash.size() - 1u;
+    size_t i = SkinKeyHashValue(key) & mask;
+
+    while (s_skinHash[i].stamp == s_skinStamp) {
+        const SkinJob& slot = s_skinJobs[s_skinHash[i].job];
+        SkinKey slotKey = { slot.model, slot.section, slot.texCoord, slot.optimized };
+
+        if (slotKey == key) {
+            return s_skinHash[i].job;
+        }
+
+        i = (i + 1u) & mask;
+    }
+
+    return 0xffffffffu;
+}
+
+static void SkinLookupAdd(const SkinKey& key, uint32_t job) {
+    if (s_skinHash.size() < (s_skinJobs.size() + 1u) * 2u) {
+        SkinRehash(s_skinHash.empty() ? 16u : s_skinHash.size() * 2u);
+    }
+
+    size_t mask = s_skinHash.size() - 1u;
+    size_t i = SkinKeyHashValue(key) & mask;
+
+    while (s_skinHash[i].stamp == s_skinStamp) {
+        i = (i + 1u) & mask;
+    }
+
+    s_skinHash[i].stamp = s_skinStamp;
+    s_skinHash[i].job = job;
+}
+
+static uint32_t SkinVertexCount(CM2Model* model, M2SkinSection* section, int32_t optimized) {
+    if (!optimized) {
+        return section->m_boneInfluences < 5 ? section->m_vertexCount : 0;
+    }
+
+    if (!model->m_optGeo || !model->m_shared || !model->m_shared->m_skinData || !model->m_skinSections) {
+        return 0;
+    }
+
+    M2SkinProfile* skin = model->m_shared->m_skinData;
+    M2BatchRange* range = &model->m_optGeo->m_batchRanges[section->m_skinSectionId];
+    uint32_t verts = 0;
+
+    for (uint32_t b = range->m_first; b <= range->m_last; ++b) {
+        uint16_t sectionIndex = skin->m_batches[b].m_skinSectionIndex;
+
+        if (!model->m_skinSections[sectionIndex]) {
+            continue;
+        }
+
+        M2SkinSection* batchSection = &skin->m_skinSections[sectionIndex];
+
+        if (batchSection->m_boneInfluences > 4) {
+            return 0;
+        }
+
+        verts += batchSection->m_vertexCount;
+    }
+
+    return verts && verts <= section->m_vertexCount ? verts : 0;
+}
+
+static void WriteSkin(const SkinJob& job, uint8_t* dst) {
+    if (!job.optimized) {
+        CM2Model::s_transformVertices[job.section->m_boneInfluences](job.model, job.section, dst, job.texCoord);
+        return;
+    }
+
+    M2SkinProfile* skin = job.model->m_shared->m_skinData;
+    M2BatchRange* range = &job.model->m_optGeo->m_batchRanges[job.section->m_skinSectionId];
+
+    for (uint32_t b = range->m_first; b <= range->m_last; ++b) {
+        uint16_t sectionIndex = skin->m_batches[b].m_skinSectionIndex;
+
+        if (!job.model->m_skinSections[sectionIndex]) {
+            continue;
+        }
+
+        M2SkinSection* batchSection = &skin->m_skinSections[sectionIndex];
+        CM2Model::s_transformVertices[batchSection->m_boneInfluences](job.model, batchSection, dst, job.texCoord);
+        dst += 32 * batchSection->m_vertexCount;
+    }
+}
+
+static void SkinRange(Job::Range range, void* user) {
+    SkinJob* jobs = static_cast<SkinJob*>(user);
+
+    for (uint32_t i = range.begin; i < range.end; ++i) {
+        WriteSkin(jobs[i], s_skinBytes.data() + jobs[i].offset);
+    }
+}
+
+// ʕ •ᴥ•ʔ✿ Vulkan blends these in Ffp.vert. Writing the skinned PNT here is unused work ✿ ʕ •ᴥ•ʔ
+static int32_t SkinGpuCovers(const M2Element* element) {
+    if (!g_theGxDevicePtr || !g_theGxDevicePtr->GpuSkinSupported() || !element->m_batch || !element->m_skinSection || !element->m_model || !element->m_model->m_shared || !element->m_model->m_shared->m_data) {
+        return 0;
+    }
+
+    if (element->m_batch->m_flags & 0x40) {
+        return 0;
+    }
+
+    M2Data* data = element->m_model->m_shared->m_data;
+    M2SkinSection* section = element->m_skinSection;
+    uint32_t boneCount = data->m_bones.m_count;
+
+    if (!boneCount || boneCount > 256 || !section->m_vertexCount || static_cast<uint32_t>(section->m_vertexStart) + section->m_vertexCount > data->m_vertices.m_count) {
+        return 0;
+    }
+
+    if (element->m_type == 0) {
+        return !(element->m_flags & 4) && !(element->m_batch->m_shader & 0x4000);
+    }
+
+    if (element->m_type != 2) {
+        return 0;
+    }
+
+    CM2Shared* shared = element->m_model->m_shared;
+
+    if (!shared->m_cache || !shared->m_skinData || (shared->m_cache->m_flags & 8) || section->m_boneCount <= 1 || section->m_boneInfluences < 1 || section->m_boneInfluences > 4 || !section->m_indexCount) {
+        return 0;
+    }
+
+    uint32_t sectionIndex = static_cast<uint32_t>(section - shared->m_skinSections);
+    return sectionIndex < shared->m_skinData->m_skinSections.m_count;
+}
+
+void M2SkinPrepare(CM2Scene* scene) {
+    Job::Wait();
+    s_skinReady = 0;
+    s_skinJobs.clear();
+    SkinLookupClear();
+    s_skinUsed = 0;
+
+    if (!scene) {
+        s_skinReady = 1;
+        return;
+    }
+
+    for (uint32_t i = 0; i < scene->m_elements.m_count; ++i) {
+        M2Element* element = &scene->m_elements.m_data[i];
+
+        if (!element->m_model || !element->m_batch || !element->m_skinSection) {
+            continue;
+        }
+
+        if (element->m_type == 2 && element->m_skinSection->m_boneCount == 1) {
+            continue;
+        }
+
+        if (element->m_type != 0 && element->m_type != 2) {
+            continue;
+        }
+
+        if (element->m_batch->m_flags & 0x40) {
+            continue;
+        }
+
+        if (SkinGpuCovers(element)) {
+            continue;
+        }
+
+        int32_t optimized = element->m_type == 0 ? static_cast<int32_t>(element->m_flags & 4) : 0;
+        int32_t texCoord = element->m_type == 2 ? 0 : ((element->m_batch->m_shader & 0x4000) ? 1 : 0);
+        SkinKey key = { element->m_model, element->m_skinSection, texCoord, optimized };
+
+        if (SkinLookupJob(key) != 0xffffffffu) {
+            continue;
+        }
+
+        uint32_t verts = SkinVertexCount(element->m_model, element->m_skinSection, optimized);
+
+        if (!verts || s_skinUsed > (64u << 20)) {
+            continue;
+        }
+
+        uint32_t offset = (s_skinUsed + 15u) & ~15u;
+        SkinJob job = { element->m_model, element->m_skinSection, texCoord, optimized, offset, verts * 32u };
+        SkinLookupAdd(key, static_cast<uint32_t>(s_skinJobs.size()));
+        s_skinJobs.push_back(job);
+        s_skinUsed = offset + job.bytes;
+    }
+
+    if (s_skinJobs.empty()) {
+        s_skinReady = 1;
+        return;
+    }
+
+    s_skinBytes.resize(s_skinUsed);
+    // ʕ •ᴥ•ʔ✿ Runs through the terrain draw. Draw joins before it reads the bytes ✿ ʕ •ᴥ•ʔ
+    Job::Start(static_cast<uint32_t>(s_skinJobs.size()), SkinRange, s_skinJobs.data());
+
+    if (!Job::WorkerCount()) {
+        s_skinReady = 1;
+    }
+}
+
+void M2SkinFinish() {
+    Job::Wait();
+    s_skinReady = 1;
+}
+
+int32_t M2SkinTake(CM2Model* model, M2SkinSection* section, int32_t texCoord, int32_t optimized, void* dst) {
+    if (!s_skinReady || !dst) {
+        return 0;
+    }
+
+    SkinKey key = { model, section, texCoord, optimized };
+    uint32_t jobIndex = SkinLookupJob(key);
+
+    if (jobIndex == 0xffffffffu) {
+        return 0;
+    }
+
+    const SkinJob& job = s_skinJobs[jobIndex];
+    memcpy(dst, s_skinBytes.data() + job.offset, job.bytes);
+    return 1;
+}
+
 // VERIFY: d0feeb6c manual
 // OFFSET: 0x00821A20
+struct ElementShaderMemo {
+    uint64_t key;
+    uint32_t vertexPermute;
+    uint32_t pixelPermute;
+    uint32_t shadowValue;
+    uint32_t stamp;
+};
+
+static ElementShaderMemo s_elementShaderMemo[64];
+static uint32_t s_elementShaderStamp;
+
+// -- ʕ •ᴥ•ʔ✿ Same inputs as ComputeElementShaders. A miss returns 0 so the batch is computed ✿ ʕ •ᴥ•ʔ
+static int32_t ElementShaderKey(const M2Material* material, const CM2Lighting* lighting, uint32_t boneInfluences, int32_t type, float alpha, uint64_t& key) {
+    uint32_t alphaBits = 0;
+
+    if (material->m_blendMode > 6) {
+        return 0;
+    }
+
+    if (material->m_blendMode == 1) {
+        int32_t bits = static_cast<int32_t>(alpha * 224.0f);
+
+        if (bits < 0 || bits > 255) {
+            return 0;
+        }
+
+        alphaBits = static_cast<uint32_t>(bits);
+    }
+
+    uint32_t boneBucket = boneInfluences > 2 ? 2u : boneInfluences;
+    key = uint64_t(material->m_blendMode)
+        | (uint64_t(material->m_flags & 1u) << 8)
+        | (uint64_t((material->m_flags >> 8) & 1u) << 9)
+        | (uint64_t(boneBucket) << 10)
+        | (uint64_t(type == 1) << 12)
+        | (uint64_t(alphaBits) << 13)
+        | (uint64_t(lighting->m_lightCount) << 21)
+        | (uint64_t(lighting->m_flags & 0x18u) << 53);
+    return 1;
+}
+
+static void ApplyElementShaders(M2Element* element, const M2Material* material, const CM2Lighting* lighting) {
+    uint64_t key = 0;
+
+    if (!ElementShaderKey(material, lighting, element->m_skinSection->m_boneInfluences, element->m_type, element->m_alpha, key)) {
+        CM2Scene::ComputeElementShaders(element);
+        return;
+    }
+
+    uint32_t slot = static_cast<uint32_t>(key ^ (key >> 32)) & 63u;
+    ElementShaderMemo& memo = s_elementShaderMemo[slot];
+
+    if (memo.stamp == s_elementShaderStamp && memo.key == key) {
+        element->m_vertexPermute = memo.vertexPermute;
+        element->m_pixelPermute = memo.pixelPermute;
+        element->m_shadowValue = memo.shadowValue;
+        return;
+    }
+
+    CM2Scene::ComputeElementShaders(element);
+    memo.key = key;
+    memo.vertexPermute = element->m_vertexPermute;
+    memo.pixelPermute = element->m_pixelPermute;
+    memo.shadowValue = element->m_shadowValue;
+    memo.stamp = s_elementShaderStamp;
+}
+
 int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
     this->m_frameStamp++;
 
@@ -1699,42 +2095,21 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
     this->m_view.Translate(move);
     this->m_viewInv = this->m_view.Inverse(this->m_view.Determinant());
 
-    if (this->m_cache->m_flags & 4) {
-        this->m_cache->BeginThread(&CM2Scene::AnimateThread, this);
+    s_animateRoots.clear();
 
-        for (CM2Model* model = this->m_animateList; model; ) {
-            if (!model->m_attachParent) {
-                if (model->m_fFlags & 0x1000) {
-                    model->AnimateMTSimple(&this->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-                } else {
-                    model->AnimateMT(&this->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-                }
-            }
-
-            CM2Model* next = model->m_animateNext;
-
-            if (!next) {
-                break;
-            }
-
-            model = next->m_animateNext;
-        }
-
-        this->m_cache->WaitThread();
-    } else {
-        for (CM2Model* model = this->m_animateList; model; model = model->m_animateNext) {
-            if (model->m_attachParent) {
-                continue;
-            }
-
-            if (model->m_fFlags & 0x1000) {
-                model->AnimateMTSimple(&this->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-            } else {
-                model->AnimateMT(&this->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-            }
+    for (CM2Model* model = this->m_animateList; model; model = model->m_animateNext) {
+        if (!model->m_attachParent) {
+            s_animateRoots.push_back(model);
         }
     }
 
+    // -- ʕ •ᴥ•ʔ✿ Each root writes only its own bones; attachments follow the parent ✿ ʕ •ᴥ•ʔ
+    M2AnimateBatch batch;
+    batch.view = &this->m_view;
+    batch.models = s_animateRoots.data();
+    Job::ParallelFor(static_cast<uint32_t>(s_animateRoots.size()), &AnimateModelRange, &batch);
+
+    // -- ʕ •ᴥ•ʔ✿ Draw-list links, ribbons, particles, and lighting stay on the main thread ✿ ʕ •ᴥ•ʔ
     for (CM2Model* model = this->m_animateList; model; model = model->m_animateNext) {
         if (!model->m_attachParent) {
             model->AnimateST();
@@ -1756,6 +2131,11 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
     }
 
     this->m_elements.m_count = 0;
+
+    if (++s_elementShaderStamp == 0) {
+        memset(s_elementShaderMemo, 0, sizeof(s_elementShaderMemo));
+        s_elementShaderStamp = 1;
+    }
 
     uint32_t elementIndex = 0;
 
@@ -1802,6 +2182,12 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
         int32_t optimized = optGeo != nullptr;
         int32_t depthSort = (this->m_cache->m_flags & 1) && !(model->m_flags & 1) && (model->m_fFlags & 0x40);
         uint32_t batchCount = optGeo ? optGeo->m_batchCount : skinData->m_batches.m_count;
+        uint32_t room = batchCount * 2 + data->m_ribbons.m_count + 1;
+        ReserveDoubling(this->m_elements, room);
+        ReserveDoubling(this->m_doodadElements, batchCount);
+        ReserveDoubling(this->m_passElements[0], room);
+        ReserveDoubling(this->m_passElements[1], room);
+        ReserveDoubling(this->m_passElements[2], room);
 
         for (uint32_t i = 0; i < batchCount; i++) {
             M2Batch* batch;
@@ -1840,7 +2226,7 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
             M2Material* material = &data->m_materials[batch->m_materialIndex];
             int32_t projected = (batch->m_flags & 4) && this->m_projectTextureCallback;
             M2Material* baseMaterial = batch->m_materialLayer ? &data->m_materials[batch->m_materialIndex - batch->m_materialLayer] : material;
-            int32_t transparent = baseMaterial->m_blendMode > M2BLEND_ALPHA_KEY || alpha < 0.99998999f;
+            int32_t transparent = baseMaterial->m_blendMode > 1 || alpha < 0.99998999f;
             CShaderEffect* effect = optimized ? model->m_optGeo->m_effects[i] : model->m_shared->m_effects[i];
 
             if (!effect) {
@@ -1878,11 +2264,11 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
             element->m_batch = batch;
             element->m_skinSection = section;
             element->m_effect = effect;
-            CM2Scene::ComputeElementShaders(element);
+            ApplyElementShaders(element, material, lighting);
 
             float sortDepth;
 
-            if (transparent < 1) {
+            if (transparent < 1 || model->m_scaleSq > 400.0f) {
                 element->m_depth = model->m_scaleSq;
                 sortDepth = model->m_scaleSq;
             } else if (data->m_flags & 0x10) {
@@ -2018,7 +2404,7 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
             element->m_pixelPermute = 0xFFFFFFFF;
             element->m_shadowValue = 0;
 
-            if (material->m_blendMode > M2BLEND_ALPHA_KEY || alpha < 0.99998999f) {
+            if (material->m_blendMode > 1 || alpha < 0.99998999f) {
                 if (above) {
                     this->m_passElements[1].New(elementIndex);
                 } else {
@@ -2177,8 +2563,9 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
         }
 
         if (j - i <= 1) {
+            // -- ʕ •ᴥ•ʔ✿ Type 2 and type 0 share a permute. Only type 1 clears the shadow ✿ ʕ •ᴥ•ʔ
             this->m_elements.m_data[index].m_type = 0;
-            CM2Scene::ComputeElementShaders(&this->m_elements.m_data[index]);
+            ReserveDoubling(this->m_passElements[0], 1);
             this->m_passElements[0].New(index);
             out--;
             i++;
@@ -2213,6 +2600,9 @@ void CM2Scene::Release() {
 // VERIFY: 610b7e45 manual
 // OFFSET: 0x00823CB0
 void CM2Scene::Draw(M2PASS pass) {
+    Profiler::Scope profile(Profiler::M2Draw);
+    M2SkinFinish();
+
     if (!((1 << pass) & this->m_passMask)) {
         return;
     }

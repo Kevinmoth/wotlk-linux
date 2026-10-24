@@ -105,7 +105,7 @@ static int32_t Script_CreateTexture(lua_State* L) {
         }
     }
 
-    void* data = CSimpleTexture::s_allocator.GetData(0, typeid(CSimpleTexture).raw_name(), SLOG_OBJECT);
+    void* data = CSimpleTexture::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleTexture), SLOG_OBJECT);
     CSimpleTexture* texture = data ? new (data) CSimpleTexture(frame, drawLayer, 1) : nullptr;
 
     if (name && *name) {
@@ -177,7 +177,7 @@ static int32_t Script_CreateFontString(lua_State* L) {
         }
     }
 
-    void* data = CSimpleFontString::s_allocator.GetData(0, typeid(CSimpleFontString).raw_name(), SLOG_OBJECT);
+    void* data = CSimpleFontString::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleFontString), SLOG_OBJECT);
     CSimpleFontString* string = data ? new (data) CSimpleFontString(frame, drawLayer, true) : nullptr;
 
     if (name && *name) {
@@ -1594,9 +1594,9 @@ static int32_t Script_EnableJoystick(lua_State* L) {
     }
 
     if (StringToBOOL(L, 2, 1)) {
-        frame->EnableEvent(SIMPLE_EVENT_JOYSTICK, -1);
+        frame->EnableEvent(SIMPLE_EVENT_4, -1);
     } else {
-        frame->DisableEvent(SIMPLE_EVENT_JOYSTICK);
+        frame->DisableEvent(SIMPLE_EVENT_4);
     }
 
     return 0;
@@ -1607,7 +1607,7 @@ static int32_t Script_EnableJoystick(lua_State* L) {
 static int32_t Script_IsJoystickEnabled(lua_State* L) {
     CSimpleFrame* frame = static_cast<CSimpleFrame*>(FrameScript_GetObjectThis(L, CSimpleFrame::GetObjectType()));
 
-    if ((frame->m_enabledEventsBitmask >> SIMPLE_EVENT_JOYSTICK) & 1) {
+    if ((frame->m_enabledEventsBitmask >> SIMPLE_EVENT_4) & 1) {
         lua_pushnumber(L, 1.0);
     } else {
         lua_pushnil(L);

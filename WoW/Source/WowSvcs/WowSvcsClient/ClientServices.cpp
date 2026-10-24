@@ -35,7 +35,6 @@
 #include "WoW/Source/WowServices/Login.h"
 #include "WoW/Source/WowServices/LoginResponse.h"
 #include "WoW/Source/WowSvcs/WowSvcsClient/AccountData.h"
-#include "GameVersion.h"
 
 // STATIC: 0x00AD91F0
 static const char* s_errorTokens[] = {
@@ -406,7 +405,7 @@ ClientConnection::ClientConnection(RealmResponse* realmResponse) : RealmConnecti
     this->m_statusComplete = 1;
     this->m_statusResult = 1;
     this->m_statusOp = COP_NONE;
-    this->m_errorCode = RESPONSE_SUCCESS;
+    this->m_errorCode = 0;
     this->m_cleanup = nullptr;
     this->m_quitAfterLogout = 0;
     this->m_loggingOut = 0;
@@ -607,7 +606,7 @@ int32_t ClientConnection::PollStatus(WOWCS_OPS& op, const char** text, int32_t& 
         return this->m_statusComplete;
     }
 
-    if (errorCode == AUTH_WAIT_QUEUE) {
+    if (errorCode == 27) {
         SStrPrintf(s_statusText, sizeof(s_statusText), token, ClientServices::Connection()->m_queuePosition);
         *text = s_statusText;
         return this->m_statusComplete;
@@ -706,8 +705,8 @@ int32_t SendBugOpcode(uint32_t suggestion, const char* text) {
     int32_t vendor;
     OsGetProcessorFeaturesEx(vendor);
 
-    if (static_cast<uint32_t>(vendor) > OS_PROCESSOR_VENDOR_CPUID_FAILED) {
-        vendor = OS_PROCESSOR_VENDOR_UNKNOWN;
+    if (static_cast<uint32_t>(vendor) > 4) {
+        vendor = 0;
     }
 
     SStrPrintf(line, sizeof(line), "Processor vendor:\t%s\n", s_processorVendors[vendor]);
@@ -732,7 +731,7 @@ int32_t SendBugOpcode(uint32_t suggestion, const char* text) {
     OsGetVersionString(line, sizeof(line));
     SStrPack(info, line, sizeof(info));
     SStrPack(info, "\n", sizeof(info));
-    SStrPrintf(line, sizeof(line), "Version:\t%s\n", "WoW [Release] Build " GAME_BUILD_STRING " (" GAME_BUILD_DATE " " GAME_BUILD_TIME ")");
+    SStrPrintf(line, sizeof(line), "Version:\t%s\n", "WoW [Release] Build 12340 (Jun 24 2010 23:54:57)");
     SStrPack(info, line, sizeof(info));
     const char* account = ClientServices::s_accountName[0] ? ClientServices::s_accountName : nullptr;
 
@@ -781,7 +780,7 @@ int32_t SendBugOpcode(uint32_t suggestion, const char* text) {
                 SStrPack(info, line, sizeof(info));
 
                 if (CGGameUI::m_lockedTarget) {
-                    CGUnit_C* target = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGGameUI::m_lockedTarget, TYPE_UNIT, __FILE__, __LINE__));
+                    CGUnit_C* target = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGGameUI::m_lockedTarget, TYPEMASK_UNIT, __FILE__, __LINE__));
 
                     if (target) {
                         SStrPrintf(line, sizeof(line), "Target:\t%s\n", target->GetUnitName(nullptr, 1));
@@ -1023,7 +1022,7 @@ void ClientServices::GetRealmList() {
         SErrDisplayAppFatalMessage("", "", 0);
     }
 
-    connection->Initiate(COP_GET_REALMS, REALM_LIST_IN_PROGRESS, nullptr);
+    connection->Initiate(COP_GET_REALMS, 35, nullptr);
 
     if (ClientServices::s_loginObj->IsLoggedOn()) {
         ClientServices::s_loginObj->GetRealmList();
@@ -1068,12 +1067,12 @@ void ClientServices::RealmEnumCallback(uint32_t result) {
     }
 
     if (result == 1) {
-        ClientServices::s_currentConnection->Complete(0, AUTH_SESSION_EXPIRED);
+        ClientServices::s_currentConnection->Complete(0, 23);
         return;
     }
 
     if (result == 3 || result == 2 || result == 4) {
-        ClientServices::s_currentConnection->Complete(0, REALM_LIST_FAILED);
+        ClientServices::s_currentConnection->Complete(0, 37);
         return;
     }
 
@@ -1081,7 +1080,7 @@ void ClientServices::RealmEnumCallback(uint32_t result) {
 
     if (connection->m_statusOp != COP_CONNECT || connection->m_realmConnectPending) {
         if (connection->m_statusOp == COP_GET_REALMS) {
-            connection->Complete(1, REALM_LIST_SUCCESS);
+            connection->Complete(1, 36);
         }
 
         return;
@@ -1092,7 +1091,7 @@ void ClientServices::RealmEnumCallback(uint32_t result) {
             connection->m_realmConnectPending = 1;
             ClientServices::s_loginObj->JoinRealm(ClientServices::m_selectRealmInfo.m_regionId, ClientServices::m_selectRealmInfo.m_battlegroupId, ClientServices::m_selectRealmInfo.m_realmId);
         } else {
-            ClientServices::Connection()->Complete(0, REALM_LIST_REALM_NOT_FOUND);
+            ClientServices::Connection()->Complete(0, 39);
         }
     } else {
         connection->m_realmConnectPending = 1;
@@ -1103,7 +1102,7 @@ void ClientServices::RealmEnumCallback(uint32_t result) {
 // VERIFY: a4f8699b auto
 // OFFSET: 0x006B1260
 int32_t ClientConnection::HandleConnect() {
-    this->Complete(1, RESPONSE_CONNECTED);
+    this->Complete(1, 5);
     this->m_connected = 1;
     WardenClient_Initialize();
 
@@ -1129,7 +1128,7 @@ int32_t ClientConnection::HandleDisconnect() {
 // VERIFY: c357ca6f auto
 // OFFSET: 0x006B1320
 int32_t ClientConnection::HandleCantConnect() {
-    this->Complete(0, RESPONSE_FAILED_TO_CONNECT);
+    this->Complete(0, 4);
     this->m_connected = 0;
     WardenClient_Destroy();
 
@@ -1145,10 +1144,10 @@ void ClientConnection::Connect() {
 
     CGlueMgr::ResetQueueState();
     this->m_realmConnectPending = 0;
-    this->Initiate(COP_CONNECT, CSTATUS_CONNECTING, nullptr);
+    this->Initiate(COP_CONNECT, 7, nullptr);
 
     if (this->m_connected) {
-        this->Complete(1, RESPONSE_CONNECTED);
+        this->Complete(1, 5);
     }
 
     ClientServices::s_loginObj->GetRealmList();
@@ -1186,12 +1185,12 @@ bool ClientServices::SetSelectedRealmInfo(int32_t force) {
 // OFFSET: 0x006B2E30
 void ClientServices::ConnectToSelectedServer() {
     if (!ClientServices::m_selectRealmInfoValid && !ClientServices::SetSelectedRealmInfo(0)) {
-        ClientServices::Connection()->Complete(0, REALM_LIST_REALM_NOT_FOUND);
+        ClientServices::Connection()->Complete(0, 39);
         return;
     }
 
     if (ClientServices::Connection()->m_netState != NS_INITIALIZED) {
-        ClientServices::Connection()->Complete(0, REALM_LIST_REALM_NOT_FOUND);
+        ClientServices::Connection()->Complete(0, 39);
         return;
     }
 
@@ -1224,13 +1223,13 @@ REALM_INFO* ClientServices::GetRealmInfoByIndex(uint32_t index) {
 // VERIFY: 815a18e9 auto
 // OFFSET: 0x006B1460
 void ClientConnection::HandleAuthResult(int32_t result) {
-    this->Complete(result == AUTH_OK, result);
+    this->Complete(result == 12, result);
 }
 
 // VERIFY: 0d280d76 manual
 // OFFSET: 0x006B14C0
 void ClientConnection::GetCharacterList() {
-    this->Initiate(COP_GET_CHARACTERS, CHAR_LIST_RETRIEVING, nullptr);
+    this->Initiate(COP_GET_CHARACTERS, 43, nullptr);
 
     if (this->m_connected) {
         this->RequestCharacterEnum();
@@ -1250,11 +1249,11 @@ void ClientRealmResponseAdapter::AddOnListReceived(RealmConnection* connection) 
 void ClientRealmResponseAdapter::HandleAuthResponse(RealmConnection* connection, uint8_t result) {
     ClientConnection* clientConnection = static_cast<ClientConnection*>(connection);
 
-    if (result == AUTH_WAIT_QUEUE) {
+    if (result == 27) {
         clientConnection->m_statusOp = COP_WAIT_QUEUE;
-        clientConnection->m_errorCode = AUTH_WAIT_QUEUE;
+        clientConnection->m_errorCode = 27;
         clientConnection->m_statusComplete = 0;
-        LogConnectionStatus(COP_WAIT_QUEUE, AUTH_WAIT_QUEUE, 1, 1);
+        LogConnectionStatus(COP_WAIT_QUEUE, 27, 1, 1);
         CGlueMgr::UpdateWaitQueue(clientConnection->m_queuePosition);
     } else {
         clientConnection->HandleAuthResult(result);
@@ -1269,9 +1268,9 @@ void ClientRealmResponseAdapter::CharacterListReceived(RealmConnection* connecti
     ClientConnection* clientConnection = static_cast<ClientConnection*>(connection);
 
     if (success) {
-        clientConnection->Complete(1, CHAR_LIST_RETRIEVED);
+        clientConnection->Complete(1, 44);
     } else {
-        clientConnection->Complete(0, CHAR_LIST_FAILED);
+        clientConnection->Complete(0, 45);
     }
 }
 
@@ -1559,7 +1558,7 @@ void ClientServices::JoinRealmResult(uint32_t realmId, int32_t a2, int32_t a3, i
     }
 
     if (!ClientServices::m_selectRealmInfoValid || !realmId || ClientServices::m_selectRealmInfo.m_realmId != realmId) {
-        ClientServices::s_currentConnection->Complete(0, RESPONSE_FAILED_TO_CONNECT);
+        ClientServices::s_currentConnection->Complete(0, 4);
         return;
     }
 

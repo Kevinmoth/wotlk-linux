@@ -1,5 +1,4 @@
 #include "MapDoodadDef.h"
-#include "WoW/Source/WorldClient/WorldLightingConstants.h"
 #include "Engine/Source/Model2/M2Data.h"
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/Model2/M2Model.h"
@@ -25,10 +24,10 @@
 // VERIFY: 4012bf37 manual
 // OFFSET: 0x007B4FA0
 void CMapDoodadDef::ExtendBounds(CMapDoodadDef* doodadDef, CMapBaseObj* parent) {
-    if (parent->m_type & CMapBaseObj::Type_Chunk) {
+    if (parent->m_type & 0x4) {
         CMapChunk* chunk = static_cast<CMapChunk*>(parent);
         chunk->m_bbox.t.z = doodadDef->m_bbox.t.z < chunk->m_bbox.t.z ? chunk->m_bbox.t.z : doodadDef->m_bbox.t.z;
-    } else if (parent->m_type & CMapBaseObj::Type_MapObjDefGroup) {
+    } else if (parent->m_type & 0x10) {
         CMapObjDefGroup* group = static_cast<CMapObjDefGroup*>(parent);
         group->m_bbox |= doodadDef->m_bbox;
 
@@ -142,10 +141,12 @@ void CMapDoodadDef::SelectLights(CM2Lighting* lighting) {
 // VERIFY: fc0f43f4 manual
 // OFFSET: 0x007C21E0
 CMapDoodadDef::CMapDoodadDef() {
-    this->m_type |= CMapBaseObj::Type_DoodadDef;
+    this->m_type |= 0x40;
     this->m_model = nullptr;
     this->m_collisionGuid = WOWGUID();
     this->m_doodadSet = 0;
+    this->m_viewStamp = -1;
+    this->m_viewVisible = 0;
 }
 
 // VERIFY: cf40d12f manual
@@ -157,7 +158,7 @@ void CMapDoodadDef::SelectUnderwater(CM2Lighting* lighting) {
         for (CMapBaseObjLink* link = this->m_parentLinkList.Head(); link; link = this->m_parentLinkList.Next(link)) {
             CMapBaseObj* parent = link->m_ref;
 
-            if (!(parent->m_type & CMapBaseObj::Type_MapObjDefGroup)) {
+            if (!(parent->m_type & 0x10)) {
                 this->m_staticFlags |= 0x80;
                 C3Vector pos(this->m_position.x, this->m_position.y, this->m_bbox.b.z);
                 int32_t liquidType;
@@ -325,8 +326,8 @@ bool CMapDoodadDef::QueryInteriorLighting(CMapObjDef* mapObjDef, int32_t groupNu
     }
 
     CImVector limit;
-    *reinterpret_cast<uint32_t*>(&limit) = MIN_INTERIOR_DIRCOLOR;
-    this->AdjustLightmap(&color, &this->m_m2DiffuseColor, limit, &this->m_m2AmbientColor, MAX_AMBIENT);
+    *reinterpret_cast<uint32_t*>(&limit) = 0xA8;
+    this->AdjustLightmap(&color, &this->m_m2DiffuseColor, limit, &this->m_m2AmbientColor, 96);
 
     if (!flag) {
         this->m_staticFlags &= ~0x1000;

@@ -1,6 +1,7 @@
 #if defined(WOWDECOMP_ARCH_64)
 
 #include <windows.h>
+#include <timeapi.h>
 #include <cstdlib>
 #include <float.h>
 #include "Engine/Source/Storm/H/storm.h"
@@ -26,6 +27,7 @@ extern "C" int start() {
 
 // OFFSET: 0x00406D70
 int main() {
+    timeBeginPeriod(1);
     _set_invalid_parameter_handler(InvalidParameterHandler);
     _clearfp();
     _control87(0x9001F & ~(_MCW_PC | _MCW_IC), _MCW_DN | _MCW_EM | _MCW_RC);
@@ -42,6 +44,15 @@ static VOID CALLBACK MainFiberProc(LPVOID parameter) {
 
 // OFFSET: 0x0040B7F0
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
+    using SetProcessDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
+    SetProcessDpiAwarenessContextFn setDpiContext = reinterpret_cast<SetProcessDpiAwarenessContextFn>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"));
+
+    if (setDpiContext) {
+        setDpiContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    } else {
+        SetProcessDPIAware();
+    }
+
     lpFiber = ConvertThreadToFiber(nullptr);
 
     if (!lpFiber) {

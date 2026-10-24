@@ -17,7 +17,6 @@
 #include "Engine/Source/Storm/Source/SLock.h"
 #include "Engine/Source/Tempest/CMath.h"
 #include "Engine/Source/Tempest/CRandom.h"
-#include "GameVersion.h"
 
 // STATIC: 0x00D4383C
 int32_t SE2::sm_bCaptureInitialized;
@@ -2449,7 +2448,7 @@ static void ProcessDeleteList(int32_t force) {
 
             sound->m_channel = nullptr;
             sound->~SESoundInternal();
-            SMemFree(sound, typeid(SESoundInternal).raw_name(), SLOG_OBJECT, 0);
+            SMemFree(sound, RAW_TYPE_NAME(SESoundInternal), SLOG_OBJECT, 0);
         }
 
         sound = next;
@@ -2763,8 +2762,6 @@ void SE2::StopAllSounds(int32_t restart) {
         }
 
         if (tries >= 20) {
-            TSGrowableArray<FMOD::Sound*> pendingRelease;
-
             s_soundListCritSect.Enter();
 
             SESoundInternal* sound = s_soundList.Head();
@@ -2774,35 +2771,13 @@ void SE2::StopAllSounds(int32_t restart) {
                     sound = s_soundList.Next(sound);
                 } else {
                     SESoundInternal* next = s_soundList.Next(sound);
-
-                    if (sound->m_type == SESOUNDTYPE_FILE) {
-                        SEFileSound* fileSound = static_cast<SEFileSound*>(sound);
-
-                        if (!fileSound->m_waveData && fileSound->m_sound) {
-                            *pendingRelease.New() = fileSound->m_sound;
-                            fileSound->m_sound = nullptr;
-                        }
-                    } else if (sound->m_type == SESOUNDTYPE_MEMORY) {
-                        SEMemorySound* memorySound = static_cast<SEMemorySound*>(sound);
-
-                        if (memorySound->m_sound) {
-                            *pendingRelease.New() = memorySound->m_sound;
-                            memorySound->m_sound = nullptr;
-                        }
-                    }
-
                     sound->~SESoundInternal();
-                    SMemFree(sound, typeid(SESoundInternal).raw_name(), SLOG_OBJECT, 0);
+                    SMemFree(sound, RAW_TYPE_NAME(SESoundInternal), SLOG_OBJECT, 0);
                     sound = next;
                 }
             }
 
             s_soundListCritSect.Leave();
-
-            for (uint32_t i = 0; i < pendingRelease.Count(); i++) {
-                pendingRelease[i]->release();
-            }
-
             break;
         }
     }
@@ -3143,7 +3118,7 @@ int32_t SE2::Init(int32_t maxChannels, bool (*positionCallback)(uint64_t, C3Vect
     OsDeleteFile("Logs\\Sound.log");
 
     if (!restart) {
-        SE2::Log_Write(__LINE__, __FILE__, FMOD_OK, "=> Version %s (%s) %s", GAME_VERSION, GAME_BUILD_STRING, GAME_BUILD_DATE);
+        SE2::Log_Write(__LINE__, __FILE__, FMOD_OK, "=> Version %s (%s) %s", "3.3.5", "12340", "Jun 24 2010");
     }
 
     SE2::Log_Write(__LINE__, __FILE__, FMOD_OK, " ");

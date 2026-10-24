@@ -1,5 +1,4 @@
 #include "CGGameObject_C_Type_Mailbox.h"
-#include "WoW/Source/UIUtil/Types.h"
 #include "WoW/Source/Object/ObjectClient/Player_C.h"
 
 // VERIFY: c799badb auto
@@ -23,7 +22,7 @@ void CGGameObject_C_Type_Mailbox::StartInteraction() {
 // VERIFY: a618df81 auto
 // OFFSET: 0x0070B680
 int32_t CGGameObject_C_Type_Mailbox::CanChangeCursor() const {
-    return this->CanUseNow(nullptr, nullptr, nullptr) ? MAIL_CURSOR : MAIL_ERROR_CURSOR;
+    return this->CanUseNow(nullptr, nullptr, nullptr) ? 15 : 41;
 }
 
 // VERIFY: 617bd209 auto

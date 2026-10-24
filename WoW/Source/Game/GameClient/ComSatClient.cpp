@@ -28,7 +28,6 @@
 #include "WoW/Source/WowSvcs/WowSvcsClient/ClientServices.h"
 #include "WoW/Source/ObjectMgrClient/ObjectMgrClient.h"
 #include "WoW/Source/DB/DBClient/DBCacheInstances.h"
-#include "GameVersion.h"
 
 // STATIC: 0x00D31AA0
 COMSATDATA s_comsatData[32];
@@ -586,7 +585,7 @@ void ComSatClient_SetCaptureDevice(int32_t index) {
 // VERIFY: 6dafafe1 manual
 // OFFSET: 0x007DB5C0
 int32_t ComSatClient_GetCurrentSessionType() {
-    if (s_currentSession >= 0) {
+    if (s_currentSession >= 0 && s_currentSession < 32) {
         return s_comsatData[s_currentSession].m_type;
     }
 
@@ -596,7 +595,7 @@ int32_t ComSatClient_GetCurrentSessionType() {
 // VERIFY: 706dd5de manual
 // OFFSET: 0x007DB5E0
 const char* ComSatClient_GetCurrentSessionName() {
-    if (s_currentSession >= 0) {
+    if (s_currentSession >= 0 && s_currentSession < 32) {
         return s_comsatData[s_currentSession].m_name;
     }
 
@@ -836,7 +835,7 @@ void ComSatClient_LeaveAllSessions(WOWGUID guid) {
 // VERIFY: 02135c1e manual
 // OFFSET: 0x007DB580
 int32_t ComSatClient_IsCurrentSession(uint64_t session) {
-    return s_currentSession >= 0 && s_comsatData[s_currentSession].m_sessionID == session;
+    return s_currentSession >= 0 && s_currentSession < 32 && s_comsatData[s_currentSession].m_sessionID == session;
 }
 
 // VERIFY: 242ea58b manual
@@ -933,13 +932,13 @@ void ComSatClient_PopulateSessionDataWithoutJoin(uint64_t session, int32_t type,
 
 // VERIFY: 1177c447 manual
 // OFFSET: 0x007DE5A0
-void VoiceSessionRosterUpdate(uint64_t session, uint16_t networkId, int32_t type, const char* name, const uint8_t* key, uint64_t self, uint8_t selfNetworkId, uint8_t selfFlags, int32_t count, VoiceRosterMember* members) {
+bool VoiceSessionRosterUpdate(uint64_t session, uint16_t networkId, int32_t type, const char* name, const uint8_t* key, uint64_t self, uint8_t selfNetworkId, uint8_t selfFlags, int32_t count, VoiceRosterMember* members) {
     s_comsatDeviceLock.Enter();
     ComSat::Interface* comsat = ComSatThread::s_comsat;
 
     if (!comsat || !name) {
         s_comsatDeviceLock.Leave();
-        return;
+        return true;
     }
 
     if (comsat->SessionCreate(session)) {
@@ -947,7 +946,7 @@ void VoiceSessionRosterUpdate(uint64_t session, uint16_t networkId, int32_t type
 
         if (!FillComsatData(session, type, name)) {
             s_comsatDeviceLock.Leave();
-            return;
+            return true;
         }
 
         WOWGUID player = ClntObjMgrGetActivePlayer();
@@ -1025,23 +1024,39 @@ void VoiceSessionRosterUpdate(uint64_t session, uint16_t networkId, int32_t type
 
     uint8_t sessionKey[16];
     memcpy(sessionKey, key, sizeof(sessionKey));
+    bool addedAll = true;
+    int32_t added = 0;
 
     for (int32_t i = 0; i < count; i++) {
-        comsat->SessionAddRemote(session, members[i].m_guid.m_guid, members[i].m_priority, sessionKey, members[i].m_address);
-        comsat->SessionSetTalkerPriority(session, members[i].m_guid.m_guid, members[i].m_talkerPriority);
+        if (!comsat->SessionAddRemote(session, members[i].m_guid.m_guid, members[i].m_priority, sessionKey, members[i].m_address)) {
+            addedAll = false;
+            continue;
+        }
+
+        if (added != i) {
+            members[added] = members[i];
+        }
+
+        comsat->SessionSetTalkerPriority(session, members[added].m_guid.m_guid, members[added].m_talkerPriority);
+        added++;
+    }
+
+    if (index >= 32) {
+        s_comsatDeviceLock.Leave();
+        return addedAll;
     }
 
     COMSATDATA* data = &s_comsatData[index];
     data->m_members[0].m_guid.m_guid = self;
     data->m_members[0].m_flags = selfFlags;
-    data->m_numMembers = count + 1;
+    data->m_numMembers = added + 1;
 
     for (uint32_t k = 1; k < data->m_numMembers; k++) {
         data->m_members[k].m_guid = members[k - 1].m_guid;
         data->m_members[k].m_flags = members[k - 1].m_flags;
     }
 
-    for (int32_t i = 0; i < count; i++) {
+    for (int32_t i = 0; i < added; i++) {
         uint32_t j;
 
         for (j = 0; j < FriendList::s_friendList->GetNumIgnores(); j++) {
@@ -1090,6 +1105,7 @@ void VoiceSessionRosterUpdate(uint64_t session, uint16_t networkId, int32_t type
     }
 
     s_comsatDeviceLock.Leave();
+    return addedAll;
 }
 
 // VERIFY: 62882824 manual
@@ -1250,7 +1266,7 @@ void Comsat::VoicePlateStart(uint64_t sessionId, uint64_t guid) {
 // VERIFY: 66f4735b auto
 // OFFSET: 0x007DBAC0
 static int32_t AcquireSingleInstanceMutex() {
-    s_comsatClientMutex.Create(1, "WOWCOMSATCLIENT" GAME_BUILD_STRING);
+    s_comsatClientMutex.Create(1, "WOWCOMSATCLIENT12340");
 
     if (s_comsatClientMutex.Valid()) {
         if (!s_comsatClientMutex.Wait(0)) {

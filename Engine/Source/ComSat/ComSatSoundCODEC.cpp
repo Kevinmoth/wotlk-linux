@@ -211,7 +211,11 @@ void ComSat::Sound::CODECIPMR6000::GenerateSilence(uint8_t* pcm, uint32_t size) 
 // VERIFY: 5d9ec280 auto
 // OFFSET: 0x00886CA0
 ComSat::Sound::CODEC* ComSat::Sound::CODEC::Create(const ComSat::Initialization& init, ComSat::Allocator& allocator) {
-    ComSat::Sound::CODEC* codec = new (allocator.Alloc(sizeof(ComSat::Sound::CODECIPMR6000))) ComSat::Sound::CODECIPMR6000(init, allocator);
+    void* memory = allocator.Alloc(sizeof(ComSat::Sound::CODECIPMR6000));
+    if (!memory) {
+        return nullptr;
+    }
+    ComSat::Sound::CODEC* codec = new (memory) ComSat::Sound::CODECIPMR6000(init, allocator);
     codec->Init();
     return codec;
 }
@@ -291,7 +295,11 @@ bool ComSat::Sound::CODECIPMR6000::InitLocalPlayer(uint8_t player, float thresho
     if (this->m_players.Find(ComSat::MapKey<uint8_t>(player), index)) {
         return false;
     }
-    LocalPlayer* localPlayer = new (this->m_allocator->Alloc(sizeof(LocalPlayer))) LocalPlayer(*this->m_allocator, this->m_maxChannels, this->m_tables);
+    void* memory = this->m_allocator->Alloc(sizeof(LocalPlayer));
+    if (!memory) {
+        return false;
+    }
+    LocalPlayer* localPlayer = new (memory) LocalPlayer(*this->m_allocator, this->m_maxChannels, this->m_tables);
     localPlayer->m_threshold = ComSat::Sound::LevelCalculator16Bit::GetMaxDecibelLevel() * threshold;
     this->m_players.Insert(ComSat::MapKey<uint8_t>(player), localPlayer);
     return true;

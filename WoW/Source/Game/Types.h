@@ -3,17 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <windows.h>
-
-enum CHARSET : int32_t {
-    CHARSET_UNKNOWN = -1,
-    CHARSET_LATIN1 = 0,
-    CHARSET_ENGLISH = 1,
-    CHARSET_RUSSIAN = 2,
-    CHARSET_KOREAN = 3,
-    CHARSET_CHINESE = 4,
-    NUM_CHARSETS = 5,
-};
+#include "Engine/Source/Base/OsTypes.h"
 
 enum VALIDATE_NAME_RESULT : int32_t {
     NAME_SUCCESS = 0,

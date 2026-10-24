@@ -3,8 +3,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "Engine/Source/Base/OsTypes.h"
 #include "WoW/Source/Object/ObjectClient/Types.h"
-#include <windows.h>
 #include "Engine/Source/Storm/H/stpl.h"
 #include "WoW/Source/Object/Object.h"
 #include "WoW/Source/Object/WGUID.h"

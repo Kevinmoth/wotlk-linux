@@ -45,11 +45,11 @@ static const XMLENUMVALUE s_framePoints[] = {
 
 // STATIC: 0x00A43FC0
 static const XMLENUMVALUE s_drawLayers[] = {
-    { DRAWLAYER_BACKGROUND, "BACKGROUND" },
-    { DRAWLAYER_BACKGROUND_BORDER, "BORDER" },
-    { DRAWLAYER_ARTWORK, "ARTWORK" },
-    { DRAWLAYER_ARTWORK_OVERLAY, "OVERLAY" },
-    { DRAWLAYER_HIGHLIGHT, "HIGHLIGHT" },
+    { 0, "BACKGROUND" },
+    { 1, "BORDER" },
+    { 2, "ARTWORK" },
+    { 3, "OVERLAY" },
+    { 4, "HIGHLIGHT" },
 };
 
 // STATIC: 0x00A43FE8
@@ -82,6 +82,7 @@ static const XMLENUMVALUE s_fontFlags[] = {
     { 0x1, "OUTLINE" },
     { 0x4, "THICKOUTLINE" },
     { 0x2, "MONOCHROME" },
+    { 0x8, "MSDF" },
 };
 
 // STATIC: 0x00A44068
@@ -772,7 +773,7 @@ int32_t LoadXML_AnimOrigin(XMLNode* node, FRAMEPOINT& point, C2Vector& offset, C
 // VERIFY: dea072e9 auto
 // OFFSET: 0x00815F40
 CSimpleTexture* LoadXML_Texture(XMLNode* node, CSimpleFrame* frame, CStatus* status) {
-    void* data = CSimpleTexture::s_allocator.GetData(0, typeid(CSimpleTexture).raw_name(), SLOG_OBJECT);
+    void* data = CSimpleTexture::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleTexture), SLOG_OBJECT);
     CSimpleTexture* texture = data ? new (data) CSimpleTexture(frame, 2, 1) : nullptr;
 
     texture->PreLoadXML(node, status);
@@ -785,7 +786,7 @@ CSimpleTexture* LoadXML_Texture(XMLNode* node, CSimpleFrame* frame, CStatus* sta
 // VERIFY: 437bdf6e auto
 // OFFSET: 0x00815FA0
 CSimpleFontString* LoadXML_String(XMLNode* node, CSimpleFrame* frame, CStatus* status) {
-    void* data = CSimpleFontString::s_allocator.GetData(0, typeid(CSimpleFontString).raw_name(), SLOG_OBJECT);
+    void* data = CSimpleFontString::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleFontString), SLOG_OBJECT);
     CSimpleFontString* string = data ? new (data) CSimpleFontString(frame, 2, true) : nullptr;
 
     string->PreLoadXML(node, status);

@@ -184,7 +184,7 @@ void CSimpleModel::SetCameraByID(uint32_t id) {
         return;
     }
 
-    if (id < NUM_OBJECT_CAMERAS) {
+    if (id < 2) {
         this->SetCamera(this->m_model->GetCameraById(id));
         return;
     }
@@ -305,7 +305,7 @@ void CSimpleModel::LoadXML(XMLNode* node, CStatus* status) {
             CImVector color;
             LoadXML_Color(child, color, status);
             this->m_fogColor = color;
-            this->m_flags |= CSimpleModel::MODEL_FOGGED;
+            this->m_flags |= 0x1;
         }
     }
 }
@@ -496,7 +496,7 @@ void CSimpleModel::RenderModel(void* arg) {
 void CSimpleModel::LightingCallback(CM2Model* model, CM2Lighting* lighting, void* arg) {
     CSimpleModel* simpleModel = static_cast<CSimpleModel*>(arg);
 
-    if (simpleModel->m_flags & CSimpleModel::MODEL_FOGGED) {
+    if (simpleModel->m_flags & 0x1) {
         lighting->SetFog(C3Vector(simpleModel->m_fogColor), simpleModel->m_fogNear, simpleModel->m_fogFar);
     }
 
@@ -526,7 +526,7 @@ void CSimpleModel::SetModel(CM2Model* model) {
         this->m_model->SetLoadedCallback(&CSimpleModel::ModelLoaded, this);
     }
 
-    this->NotifyDrawLayerChanged(DRAWLAYER_ARTWORK);
+    this->NotifyDrawLayerChanged(2);
 }
 
 // VERIFY: b15a7a55 auto

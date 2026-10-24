@@ -1,7 +1,6 @@
 #ifndef WOW_SOURCE_DB_DBCLIENT_DBCLIENT_H
 #define WOW_SOURCE_DB_DBCLIENT_DBCLIENT_H
 
-#include "WoW/Source/DB/Types.h"
 #include "WoW/Source/DB/WowClientDB.h"
 #include "WoW/Source/DB/Rec/AchievementRec.h"
 #include "WoW/Source/DB/Rec/Achievement_CategoryRec.h"
@@ -245,23 +244,7 @@
 #include "WoW/Source/DB/Rec/gtRegenHPPerSptRec.h"
 #include "WoW/Source/DB/Rec/gtRegenMPPerSptRec.h"
 
-enum STRINGLOOKUP : uint32_t {
-    SLOOKUP_INVENTORYICONPATH = 3,
-
-    // Unused 0.5.3 definitions; current assignments are unverified.
-    // SLOOKUP_UNUSED = 0,
-    // SLOOKUP_DEFAULTCURSOR = 1,
-    // SLOOKUP_INVENTORYICONBUTTONGEOMETRY = 2,
-    // SLOOKUP_QUESTGIVERINDICATORTEXTURE = 4,
-    // SLOOKUP_QUESTGIVERINDICATORMODEL = 5,
-    // SLOOKUP_QUESTGIVERINDICATORMODELFUTURE = 6,
-    // SLOOKUP_TAXINODEINDICATORMODEL = 7,
-    // SLOOKUP_BINDERINDICATORMODEL = 8,
-    // SLOOKUP_QUESTGIVERINDICATORMODELCOMPLETION = 9,
-    // NUM_STRINGLOOKUPS = 10,
-};
-
-extern const char* g_localeNames[NUM_DB_LOCALES];
+extern const char* g_localeNames[12];
 extern WowClientDB<AchievementRec> g_achievementDB;
 extern WowClientDB<Achievement_CriteriaRec> g_achievement_CriteriaDB;
 extern WowClientDB<Achievement_CategoryRec> g_achievement_CategoryDB;
@@ -354,7 +337,10 @@ extern WowClientDB<HelmetGeosetVisDataRec> g_helmetGeosetVisDataDB;
 extern WowClientDB<HolidayDescriptionsRec> g_holidayDescriptionsDB;
 extern WowClientDB<HolidayNamesRec> g_holidayNamesDB;
 extern WowClientDB<HolidaysRec> g_holidaysDB;
+template <>
+ItemRec* WowClientDB<ItemRec>::GetRecord(int32_t id) const;
 extern WowClientDB<ItemRec> g_itemDB;
+void ClearItemDBOverlay();
 extern WowClientDB<ItemBagFamilyRec> g_itemBagFamilyDB;
 extern WowClientDB<ItemClassRec> g_itemClassDB;
 extern WowClientDB<ItemCondExtCostsRec> g_itemCondExtCostsDB;
@@ -521,9 +507,9 @@ int32_t GetPhysicalDamageClassID();
 uint32_t GetPhysicalDamageClassMask();
 
 int32_t GetMapResetTime(int32_t mapId, uint32_t difficulty);
-DB_LOCALE_INDEX LocaleNameToIndex(const char* locale);
+int32_t LocaleNameToIndex(const char* locale);
 
 void DBCache_ClearTemporaryCaches();
-const char* ClientDBStringLookup(STRINGLOOKUP lookup);
+const char* ClientDBStringLookup(uint32_t lookup);
 
 #endif

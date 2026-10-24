@@ -3,7 +3,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include "WoW/Source/SoundInterface/Types.h"
 
 struct IMPACTSOUND {
     /* 0000 */ int32_t m_soundId;
@@ -13,7 +12,7 @@ struct IMPACTSOUND {
 };
 
 struct IMPACTSOUNDARRAY {
-    /* 0000 */ IMPACTSOUND m_sounds[10][NUM_PARRYMATERIALS];
+    /* 0000 */ IMPACTSOUND m_sounds[10][2];
 };
 
 #endif

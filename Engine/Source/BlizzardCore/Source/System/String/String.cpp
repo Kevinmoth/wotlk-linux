@@ -1,6 +1,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstring>
+#include "Engine/Source/Base/OsCrt.h"
 #include "Engine/Source/BlizzardCore/Source/System/String/String.h"
 #include "Engine/Source/Storm/H/storm.h"
 
@@ -189,6 +190,10 @@ char* System_String::Duplicate(const char* str, const char* fileName, int32_t li
 
     uint32_t bytes = static_cast<uint32_t>(strlen(str)) + 1;
     char* dst = static_cast<char*>(SMemAlloc(bytes, fileName, lineNumber, 0));
+    if (!dst) {
+        return nullptr;
+    }
+
     Blizzard::String::MemCopy(dst, str, bytes);
 
     return dst;

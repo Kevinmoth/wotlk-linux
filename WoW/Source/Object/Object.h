@@ -3,7 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <windows.h>
+#include "Engine/Source/Base/OsTypes.h"
 #include "WoW/Source/Object/ObjectClient/Types.h"
 #include "WoW/Source/Object/Types.h"
 #include "WoW/Source/Object/WGUID.h"
@@ -29,7 +29,7 @@ class CGObject {
 class CGObjectData {
     public:
     /* 0000 */ WOWGUID m_guid;
-    /* 0008 */ OBJECT_TYPE m_type;
+    /* 0008 */ TypeMask m_type;
     /* 000C */ uint32_t m_entryID;
     /* 0010 */ float m_scale;
     /* 0014 */ uint32_t m_pad;

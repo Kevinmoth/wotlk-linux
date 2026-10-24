@@ -10,6 +10,10 @@
 #include "Engine/Source/Tempest/CImVector.h"
 #include "Engine/Source/Storm/H/storm.h"
 
+#if defined(WOWDECOMP_VULKAN)
+#include "Engine/Source/Gx/CGxDeviceVulkan/CGxDeviceVulkan.h"
+#endif
+
 // STATIC: 0x00A2D57C
 static const uint32_t s_texelSize[GxTexFormats_Last] = { 0, 4, 4, 2, 2, 2, 2, 4, 4, 2, 4, 4, 4 };
 
@@ -39,7 +43,11 @@ static BlitFormat s_blitFormats[GxTexFormats_Last] = {
 };
 
 // STATIC: 0x00AD87E4
+#if defined(WOWDECOMP_VULKAN)
 const char* g_gxApiNames[GxApis_Last] = { "OpenGL", "D3D9", "D3D9Ex", "D3D10", "D3D11", "GLL", "Vulkan" };
+#else
+const char* g_gxApiNames[GxApis_Last] = { "OpenGL", "D3D9", "D3D9Ex", "D3D10", "D3D11", "GLL" };
+#endif
 
 // STATIC: 0x00AD8AC0
 static uint32_t s_vertexSize[GxVertexBufferFormats_Last] = { 12, 24, 28, 32, 36, 40, 44, 16, 24, 32, 20, 28, 48, 48 };
@@ -115,22 +123,69 @@ static int (*s_drawListSorters[GxuSorts_Last])(const void*, const void*) = { Dra
 // VERIFY: 0b88acbc auto
 // OFFSET: 0x008C8DE0
 EGxApi GxDefaultApi() {
+#if defined(WOWDECOMP_VULKAN)
+    // ʕ •ᴥ•ʔ✿ Name stays inside g_gxApiNames so gxApi registration still gets a string when the loader is absent ✿ ʕ •ᴥ•ʔ
+#if defined(_WIN32) && !defined(WOWDECOMP_WIN_ARM64)
+    // ʕ ◕ᴥ◕ ʔ✿ Stable local play on Win x64; set gxApi Vulkan in Config.wtf to test the Vulkan backend ✿ ʕ ◕ᴥ◕ ʔ
     return GxApi_D3d9;
+#else
+    return GxApiSupported(GxApi_Vulkan) ? GxApi_Vulkan : GxApi_D3d9;
+#endif
+#else
+    return GxApi_D3d9;
+#endif
 }
+
+#if defined(WOWDECOMP_VULKAN) && defined(WOWDECOMP_UNIX)
+static int32_t UnixVulkanLoaderPresent() {
+    static int32_t s_present = -1;
+    if (s_present >= 0) {
+        return s_present;
+    }
+
+    // ʕ •ᴥ•ʔ✿ Same entry CreateInstance needs. Drop volk's module so the device can reload through SDL ✿ ʕ •ᴥ•ʔ
+    if (vkGetInstanceProcAddr) {
+        s_present = 1;
+        return s_present;
+    }
+
+    s_present = (volkInitialize() == VK_SUCCESS && vkGetInstanceProcAddr) ? 1 : 0;
+    volkFinalize();
+    return s_present;
+}
+#endif
 
 // VERIFY: cef2b995 auto
 // OFFSET: 0x006811D0
 int32_t GxApiSupported(EGxApi api) {
+#if defined(WOWDECOMP_UNIX)
+    #if defined(WOWDECOMP_VULKAN)
+    return api == GxApi_Vulkan && UnixVulkanLoaderPresent();
+    #else
+    return 0;
+    #endif
+#else
     switch (api) {
         case GxApi_OpenGl:
         case GxApi_D3d9:
         case GxApi_D3d9Ex:
-        case GxApi_Vulkan:
             return 1;
-
+#if defined(WOWDECOMP_VULKAN)
+        case GxApi_Vulkan: {
+            // ʕ •ᴥ•ʔ✿ Probe the loader once: without vulkan-1.dll the API is unsupported, not a startup crash ✿ ʕ •ᴥ•ʔ
+            static int32_t s_vulkanLoader = -1;
+            if (s_vulkanLoader < 0) {
+                HMODULE loader = LoadLibraryExA("vulkan-1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR);
+                s_vulkanLoader = loader ? 1 : 0;
+                if (loader) FreeLibrary(loader);
+            }
+            return s_vulkanLoader;
+        }
+#endif
         default:
             return 0;
     }
+#endif
 }
 
 // VERIFY: 619cba02 auto
@@ -181,6 +236,7 @@ CGxDevice* CreateGxDevice(EGxApi api, GxWindowProc windowProc, const CGxFormat& 
     CGxDevice* device;
 
     switch (api) {
+#if defined(_WIN32) && !defined(WOWDECOMP_WIN_ARM64)
         case GxApi_OpenGl:
             device = CreateCGxDeviceOpenGl();
             g_theGxDevicePtr = device;
@@ -195,15 +251,22 @@ CGxDevice* CreateGxDevice(EGxApi api, GxWindowProc windowProc, const CGxFormat& 
             device = CreateCGxDeviceD3d9Ex();
             g_theGxDevicePtr = device;
             break;
+#endif
 
+#if defined(WOWDECOMP_VULKAN)
         case GxApi_Vulkan:
             device = CreateCGxDeviceVulkan();
             g_theGxDevicePtr = device;
             break;
+#endif
 
         default:
             device = g_theGxDevicePtr;
             break;
+    }
+
+    if (!device) {
+        return nullptr;
     }
 
     if (device->DeviceCreate(windowProc, format)) {
@@ -212,6 +275,8 @@ CGxDevice* CreateGxDevice(EGxApi api, GxWindowProc windowProc, const CGxFormat& 
 
     if (g_theGxDevicePtr) {
         delete g_theGxDevicePtr;
+        // ʕ •ᴥ•ʔ✿ Clear the global so a caller can retry with another API instead of reusing a dead device ✿ ʕ •ᴥ•ʔ
+        g_theGxDevicePtr = nullptr;
     }
 
     return nullptr;
@@ -904,7 +969,7 @@ void GxLogClose() {
 void GxLog(const char* format, ...) {
     va_list args;
     va_start(args, format);
-    CGxDevice::Log(format, args);
+    CGxDevice::LogV(format, args);
     va_end(args);
 }
 
@@ -915,9 +980,9 @@ void GxLogCrashInfo(char* buffer, uint32_t size) {
         return;
     }
 
-    SStrPack(buffer, "\r\n----------------------------------------\r\n", STORM_MAX_STR);
-    SStrPack(buffer, "               GxInfo\r\n", STORM_MAX_STR);
-    SStrPack(buffer, "----------------------------------------\r\n", STORM_MAX_STR);
+    SStrPack(buffer, "\r\n----------------------------------------\r\n", size);
+    SStrPack(buffer, "               GxInfo\r\n", size);
+    SStrPack(buffer, "----------------------------------------\r\n", size);
 
     char line[260];
     SStrPrintf(line, sizeof(line), "GxApi: %s\r\n", g_gxApiNames[g_theGxDevicePtr->DeviceApi()]);

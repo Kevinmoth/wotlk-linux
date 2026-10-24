@@ -6,6 +6,7 @@
 #include "Engine/Source/Os/TimeManager.h"
 #include "Engine/Source/Storm/Source/MD5.h"
 #include "WoW/Source/WowServices/SRP6_Random.h"
+#include "WoW/Source/WowServices/WowConnectionNet.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Util/SHA1.h"
 #include "WoW/Source/Client.h"
@@ -100,6 +101,9 @@ void Grunt::ClientLink::Shutdown() {
     if (this->m_connection) {
         this->m_connection->Disconnect();
         this->m_connection->SetResponse(nullptr, false);
+        if (WowConnection::s_network && this->m_connection->m_netLink.IsLinked()) {
+            WowConnection::s_network->Remove(this->m_connection);
+        }
         this->m_connection->Release();
         this->m_connection = nullptr;
     }
@@ -131,6 +135,11 @@ void Grunt::ClientLink::SetState(int32_t state) {
 // OFFSET: 0x008CBB40
 void Grunt::ClientLink::Connect(const char* address) {
     if (this->m_state) {
+        return;
+    }
+
+    if (!address) {
+        this->m_clientResponse->CantConnect();
         return;
     }
 

@@ -90,6 +90,13 @@ float g_indentPixelWidth;
 // STATIC: 0x00C7D2C0
 uint8_t g_fontStatsEnabled;
 
+int32_t g_fontMsdf;
+float g_fontMsdfRange = 4.0f;
+
+float GxuFontMsdfRange() {
+    return g_fontMsdfRange;
+}
+
 // STATIC: 0x00C7D2C4
 uint32_t g_heightPixels;
 
@@ -224,7 +231,8 @@ float GxuFontGetOneToOneHeight(CGxFont* face) {
         return 0.0f;
     }
 
-    return static_cast<float>(face->GetPixelSize()) / static_cast<float>(g_heightPixels);
+    uint32_t em = face->m_nominalSize ? face->m_nominalSize : face->GetPixelSize();
+    return static_cast<float>(em) / static_cast<float>(g_heightPixels);
 }
 
 // VERIFY: 1ebc6f2b auto
@@ -896,13 +904,65 @@ int32_t GxuFontCreateFont(const char* name, float fontHeight, CGxFont*& face, ui
     return result;
 }
 
+static int32_t s_msdfFlush;
+
+void GxuFontSetMsdfEnabled(int32_t enabled) {
+    enabled = enabled != 0;
+
+    if (g_fontMsdf == enabled) {
+        return;
+    }
+
+    g_fontMsdf = enabled;
+    s_msdfFlush = 1;
+    GxuFontFlushMsdf();
+}
+
+void GxuFontSetMsdfRange(float range) {
+    if (range < 1.0f) {
+        range = 1.0f;
+    } else if (range > 8.0f) {
+        range = 8.0f;
+    }
+
+    if (range == g_fontMsdfRange) {
+        return;
+    }
+
+    g_fontMsdfRange = range;
+    s_msdfFlush = 1;
+    GxuFontFlushMsdf();
+}
+
+void GxuFontFlushMsdf() {
+    if (!s_msdfFlush || !g_theGxDevicePtr) {
+        return;
+    }
+
+    s_msdfFlush = 0;
+
+    for (CGxFont* font = g_fonts.Head(); font; font = g_fonts.Next(font)) {
+        uint32_t flags = font->m_fontFlags;
+        uint32_t next = flags;
+
+        if (g_fontMsdf) {
+            next |= GxFontFlag_Msdf;
+        } else if (!(flags & GxFontFlag_MsdfExplicit)) {
+            next &= ~GxFontFlag_Msdf;
+        }
+
+        font->m_fontFlags = next;
+        font->HandleScreenSizeChange();
+    }
+}
+
 // VERIFY: 96f05107 auto
 // OFFSET: 0x006BDF90
 void GxuFontDestroyFont(CGxFont*& face) {
     if (face) {
         CGxFont* ptr = face;
         ptr->~CGxFont();
-        SMemFree(ptr, typeid(CGxFont).raw_name(), SLOG_OBJECT, 0);
+        SMemFree(ptr, RAW_TYPE_NAME(CGxFont), SLOG_OBJECT, 0);
     }
 
     face = nullptr;
@@ -981,13 +1041,13 @@ int32_t GxuFontCreateString(CGxFont* face, const char* text, float fontHeight, c
         return 0;
     }
 
-    if (vertJust >= GxVJ_Last) {
+    if (vertJust >= 3) {
         DebugValidate("vertJustification < GxVJ_Last");
         SErrSetLastError(STORM_ERROR_INVALID_PARAMETER);
         return 0;
     }
 
-    if (horzJust >= GxHJ_Last) {
+    if (horzJust >= 3) {
         DebugValidate("horzJustification < GxHJ_Last");
         SErrSetLastError(STORM_ERROR_INVALID_PARAMETER);
         return 0;
@@ -1143,7 +1203,7 @@ CGxStringBatch* GxuFontCreateBatch(bool billboarded, bool worldSpace) {
     if (batch) {
         s_freeBatches.UnlinkNode(batch);
     } else {
-        batch = new (SMemAlloc(sizeof(CGxStringBatch), typeid(CGxStringBatch).raw_name(), SLOG_OBJECT, SMEM_FLAG_ZEROMEMORY)) CGxStringBatch;
+        batch = new (SMemAlloc(sizeof(CGxStringBatch), RAW_TYPE_NAME(CGxStringBatch), SLOG_OBJECT, SMEM_FLAG_ZEROMEMORY)) CGxStringBatch;
     }
 
     if (billboarded) {

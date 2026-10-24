@@ -3,7 +3,11 @@
 
 #include <cstdint>
 
+#if defined(_WIN32)
 #define STORMAPI __stdcall
+#else
+#define STORMAPI
+#endif
 
 struct _CMDPARAMS {
     /* 0000 */ uint32_t flags;
@@ -34,10 +38,6 @@ enum ArgumentSize {
     e_longLongSized = 3,
     e_doubleSized = 4,
     e_takesNoSpace = 5,
-};
-
-enum : uint32_t {
-    SMEM_ALLOCATOR_SYSTEM = 2,
 };
 
 enum SMEMREPORTTYPE {

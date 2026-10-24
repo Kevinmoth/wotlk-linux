@@ -84,266 +84,266 @@ int32_t CSimpleButton::GetMotionScriptsWhileDisabled() {
 // OFFSET: 0x0096E9C0
 uint64_t MouseButtonStringToBitmask(const char* string) {
     if (!string || !*string) {
-        return CLICK_ON_NONE;
+        return 0;
     }
 
     if (!SStrCmpI(string, "LeftButtonDown", STORM_MAX_STR)) {
-        return CLICK_ON_LEFTDOWN;
+        return 0x1ULL;
     }
 
     if (!SStrCmpI(string, "LeftButtonUp", STORM_MAX_STR)) {
-        return CLICK_ON_LEFTUP;
+        return 0x80000000ULL;
     }
 
     if (!SStrCmpI(string, "MiddleButtonDown", STORM_MAX_STR)) {
-        return CLICK_ON_MIDDLEDOWN;
+        return 0x2ULL;
     }
 
     if (!SStrCmpI(string, "MiddleButtonUp", STORM_MAX_STR)) {
-        return CLICK_ON_MIDDLEUP;
+        return 0x100000000ULL;
     }
 
     if (!SStrCmpI(string, "RightButtonDown", STORM_MAX_STR)) {
-        return CLICK_ON_RIGHTDOWN;
+        return 0x4ULL;
     }
 
     if (!SStrCmpI(string, "RightButtonUp", STORM_MAX_STR)) {
-        return CLICK_ON_RIGHTUP;
+        return 0x200000000ULL;
     }
 
     if (!SStrCmpI(string, "Button4Down", STORM_MAX_STR)) {
-        return CLICK_ON_X1DOWN;
+        return 0x8ULL;
     }
 
     if (!SStrCmpI(string, "Button4Up", STORM_MAX_STR)) {
-        return CLICK_ON_X1UP;
+        return 0x400000000ULL;
     }
 
     if (!SStrCmpI(string, "Button5Down", STORM_MAX_STR)) {
-        return CLICK_ON_X2DOWN;
+        return 0x10ULL;
     }
 
     if (!SStrCmpI(string, "Button5Up", STORM_MAX_STR)) {
-        return CLICK_ON_X2UP;
+        return 0x800000000ULL;
     }
 
     if (!SStrCmpI(string, "Button6Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON6DOWN;
+        return 0x20ULL;
     }
 
     if (!SStrCmpI(string, "Button6Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON6UP;
+        return 0x1000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button7Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON7DOWN;
+        return 0x40ULL;
     }
 
     if (!SStrCmpI(string, "Button7Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON7UP;
+        return 0x2000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button8Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON8DOWN;
+        return 0x80ULL;
     }
 
     if (!SStrCmpI(string, "Button8Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON8UP;
+        return 0x4000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button9Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON9DOWN;
+        return 0x100ULL;
     }
 
     if (!SStrCmpI(string, "Button9Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON9UP;
+        return 0x8000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button10Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON10DOWN;
+        return 0x200ULL;
     }
 
     if (!SStrCmpI(string, "Button10Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON10UP;
+        return 0x10000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button11Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON11DOWN;
+        return 0x400ULL;
     }
 
     if (!SStrCmpI(string, "Button11Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON11UP;
+        return 0x20000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button12Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON12UP;
+        return 0x40000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button12Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON12DOWN;
+        return 0x800ULL;
     }
 
     if (!SStrCmpI(string, "Button13Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON13UP;
+        return 0x80000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button13Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON13DOWN;
+        return 0x1000ULL;
     }
 
     if (!SStrCmpI(string, "Button14Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON14UP;
+        return 0x100000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button14Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON14DOWN;
+        return 0x2000ULL;
     }
 
     if (!SStrCmpI(string, "Button15Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON15UP;
+        return 0x200000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button15Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON15DOWN;
+        return 0x4000ULL;
     }
 
     if (!SStrCmpI(string, "Button16Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON16UP;
+        return 0x400000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button16Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON16DOWN;
+        return 0x8000ULL;
     }
 
     if (!SStrCmpI(string, "Button17Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON17UP;
+        return 0x800000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button17Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON17DOWN;
+        return 0x10000ULL;
     }
 
     if (!SStrCmpI(string, "Button18Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON18UP;
+        return 0x1000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button18Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON18DOWN;
+        return 0x20000ULL;
     }
 
     if (!SStrCmpI(string, "Button19Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON19UP;
+        return 0x2000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button19Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON19DOWN;
+        return 0x40000ULL;
     }
 
     if (!SStrCmpI(string, "Button20Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON20DOWN;
+        return 0x80000ULL;
     }
 
     if (!SStrCmpI(string, "Button20Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON20UP;
+        return 0x4000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button21Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON21DOWN;
+        return 0x100000ULL;
     }
 
     if (!SStrCmpI(string, "Button21Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON21UP;
+        return 0x8000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button22Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON22UP;
+        return 0x10000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button22Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON22DOWN;
+        return 0x200000ULL;
     }
 
     if (!SStrCmpI(string, "Button23Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON23UP;
+        return 0x20000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button23Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON23DOWN;
+        return 0x400000ULL;
     }
 
     if (!SStrCmpI(string, "Button24Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON24UP;
+        return 0x40000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button24Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON24DOWN;
+        return 0x800000ULL;
     }
 
     if (!SStrCmpI(string, "Button25Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON25UP;
+        return 0x80000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button25Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON25DOWN;
+        return 0x1000000ULL;
     }
 
     if (!SStrCmpI(string, "Button26Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON26UP;
+        return 0x100000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button26Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON26DOWN;
+        return 0x2000000ULL;
     }
 
     if (!SStrCmpI(string, "Button27Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON27UP;
+        return 0x200000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button27Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON27DOWN;
+        return 0x4000000ULL;
     }
 
     if (!SStrCmpI(string, "Button28Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON28UP;
+        return 0x400000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button28Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON28DOWN;
+        return 0x8000000ULL;
     }
 
     if (!SStrCmpI(string, "Button29Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON29UP;
+        return 0x800000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button29Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON29DOWN;
+        return 0x10000000ULL;
     }
 
     if (!SStrCmpI(string, "Button30Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON30DOWN;
+        return 0x20000000ULL;
     }
 
     if (!SStrCmpI(string, "Button30Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON30UP;
+        return 0x1000000000000000ULL;
     }
 
     if (!SStrCmpI(string, "Button31Down", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON31DOWN;
+        return 0x40000000ULL;
     }
 
     if (!SStrCmpI(string, "Button31Up", STORM_MAX_STR)) {
-        return CLICK_ON_BUTTON31UP;
+        return 0x2000000000000000ULL;
     }
 
     if (!SStrCmpI(string, "AnyDown", STORM_MAX_STR)) {
-        return CLICK_ON_ANYDOWN;
+        return 0x7FFFFFFFULL;
     }
 
     if (!SStrCmpI(string, "AnyUp", STORM_MAX_STR)) {
-        return CLICK_ON_ANYUP;
+        return 0xFFFFFFFF80000000ULL;
     }
 
-    return CLICK_ON_NONE;
+    return 0;
 }
 
 // VERIFY: 7ac18ca5 auto
@@ -535,7 +535,7 @@ void CSimpleButton::UpdateTextState(CSimpleButtonState state) {
         }
     }
 
-    if (this->m_drawLayerEnabled[DRAWLAYER_HIGHLIGHT]) {
+    if (this->m_drawLayerEnabled[4]) {
         this->m_fontString->SetFontObject(this->m_highlightFont);
     } else {
         this->m_fontString->SetFontObject(this->m_normalFont);
@@ -576,37 +576,37 @@ const char* GetMouseButtonName(uint32_t button) {
             return "Button14";
         case 0x4000:
             return "Button15";
-        case MOUSE_BUTTON_XBUTTON13:
+        case 0x8000:
             return "Button16";
-        case MOUSE_BUTTON_XBUTTON14:
+        case 0x10000:
             return "Button17";
-        case MOUSE_BUTTON_XBUTTON15:
+        case 0x20000:
             return "Button18";
-        case MOUSE_BUTTON_XBUTTON16:
+        case 0x40000:
             return "Button19";
-        case MOUSE_BUTTON_XBUTTON17:
+        case 0x80000:
             return "Button20";
-        case MOUSE_BUTTON_XBUTTON18:
+        case 0x100000:
             return "Button21";
-        case MOUSE_BUTTON_XBUTTON19:
+        case 0x200000:
             return "Button22";
-        case MOUSE_BUTTON_XBUTTON20:
+        case 0x400000:
             return "Button23";
-        case MOUSE_BUTTON_XBUTTON21:
+        case 0x800000:
             return "Button24";
-        case MOUSE_BUTTON_XBUTTON22:
+        case 0x1000000:
             return "Button25";
-        case MOUSE_BUTTON_XBUTTON23:
+        case 0x2000000:
             return "Button26";
-        case MOUSE_BUTTON_XBUTTON24:
+        case 0x4000000:
             return "Button27";
-        case MOUSE_BUTTON_XBUTTON25:
+        case 0x8000000:
             return "Button28";
-        case MOUSE_BUTTON_XBUTTON26:
+        case 0x10000000:
             return "Button29";
-        case MOUSE_BUTTON_XBUTTON27:
+        case 0x20000000:
             return "Button30";
-        case MOUSE_BUTTON_XBUTTON28:
+        case 0x40000000:
             return "Button31";
         default:
             return "UNKNOWN";
@@ -652,7 +652,7 @@ void CSimpleButton::SetText(const char* text) {
     }
 
     if (!this->m_fontString) {
-        void* data = CSimpleFontString::s_allocator.GetData(0, typeid(CSimpleFontString).raw_name(), SLOG_OBJECT);
+        void* data = CSimpleFontString::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleFontString), SLOG_OBJECT);
         this->SetFontString(data ? new (data) CSimpleFontString(this, 2, true) : nullptr);
     }
 
@@ -716,7 +716,7 @@ int32_t CSimpleButton::SetHighlight(const char* fileName, EGxBlend blend) {
         return 1;
     }
 
-    void* data = CSimpleTexture::s_allocator.GetData(0, typeid(CSimpleTexture).raw_name(), SLOG_OBJECT);
+    void* data = CSimpleTexture::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleTexture), SLOG_OBJECT);
     texture = data ? new (data) CSimpleTexture(this, 4, 1) : nullptr;
 
     if (!texture->SetTexture(fileName, 0, 0, CSimpleTexture::s_textureFilterMode, ImageMode_Normal)) {
@@ -756,7 +756,7 @@ int32_t CSimpleButton::OnLayerMouseDown(const CMouseEvent& evt, const char* btn)
         return 1;
     }
 
-    uint32_t button = btn ? static_cast<uint32_t>(CLICK_ON_ANYDOWN) : evt.m_data.m_button;
+    uint32_t button = btn ? 0x7FFFFFFF : evt.m_data.m_button;
 
     if (this->m_clickAction & button) {
         if (!btn) {
@@ -791,7 +791,7 @@ int32_t CSimpleButton::OnLayerMouseUp(const CMouseEvent& evt, const char* btn) {
     uint64_t button = 0;
 
     if (btn) {
-        button = CLICK_ON_ANYUP;
+        button = 0xFFFFFFFF80000000ULL;
     } else {
         C2Vector pt;
         pt.x = evt.m_data.m_mousePosition.x;
@@ -1040,7 +1040,7 @@ int32_t CSimpleButton::SetStateTexture(CSimpleButtonState state, const char* fil
         return 1;
     }
 
-    void* data = CSimpleTexture::s_allocator.GetData(0, typeid(CSimpleTexture).raw_name(), SLOG_OBJECT);
+    void* data = CSimpleTexture::s_allocator.GetData(0, RAW_TYPE_NAME(CSimpleTexture), SLOG_OBJECT);
     CSimpleTexture* texture = data ? new (data) CSimpleTexture(nullptr, 2, 1) : nullptr;
 
     if (!texture->SetTexture(fileName, 0, 0, CSimpleTexture::s_textureFilterMode, ImageMode_Normal)) {
@@ -1071,7 +1071,7 @@ void CSimpleButton::Enable(int32_t enabled) {
         }
 
         if (this->m_highlightLocked) {
-            this->EnableDrawLayer(DRAWLAYER_HIGHLIGHT);
+            this->EnableDrawLayer(4);
         }
     } else {
         if (this->m_state == BUTTONSTATE_DISABLED) {
@@ -1082,7 +1082,7 @@ void CSimpleButton::Enable(int32_t enabled) {
             this->OnLayerCursorExit(0, 1);
         }
 
-        this->DisableDrawLayer(DRAWLAYER_HIGHLIGHT);
+        this->DisableDrawLayer(4);
         this->SetButtonState(BUTTONSTATE_DISABLED, 0);
     }
 
@@ -1104,7 +1104,7 @@ CSimpleButton::CSimpleButton(CSimpleFrame* parent) : CSimpleFrame(parent) {
     this->m_stateLocked = 0;
     this->m_motionScriptsWhileDisabled = 0;
     this->m_lastClickTime = 0;
-    this->m_clickAction = CLICK_ON_LEFTUP;
+    this->m_clickAction = 0x80000000;
     this->m_fontString = nullptr;
     this->m_normalFont = nullptr;
     this->m_highlightFont = nullptr;

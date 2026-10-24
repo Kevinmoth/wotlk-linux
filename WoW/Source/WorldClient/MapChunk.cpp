@@ -1,12 +1,14 @@
 #include "MapChunk.h"
-#include "WoW/Source/WorldClient/WorldConstants.h"
 #include "WoW/Source/WorldClient/DetailDoodad.h"
+#include "WoW/Source/WorldClient/WorldParam_CVarSlider.h"
 #include "WoW/Source/WorldClient/CDetailDoodadData.h"
 #include "Engine/Source/Tempest/CRandom.h"
 #include "Engine/Source/Tempest/C3Ray.h"
 #include "Engine/Source/Tempest/NTempest.h"
 #include <cmath>
+#include <cstring>
 #include "Engine/Source/Base/CDataAllocator.h"
+#include "Engine/Source/Base/Profiler.h"
 #include "Engine/Source/Base/RCString.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/Gx.h"
@@ -44,7 +46,9 @@
 #include "WoW/Source/WorldClient/MapLight.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include "WoW/Source/WorldClient/DayNight.h"
+#include "WoW/Source/WorldClient/SortTable.h"
 #include "Engine/Source/Model2/M2Light.h"
+#include <vector>
 
 // STATIC: 0x00A3FBB8
 static const uint16_t s_bitMask[8] = { 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80 };
@@ -73,6 +77,12 @@ static const int32_t s_subVertexTriangles[12] = { 17, 9, 0, 9, 1, 0, 9, 17, 18, 
 // STATIC: 0x00A40618
 static const int32_t s_subVertexIndexFlat[5] = { 0, 9, 17, 1, 18 };
 
+static int32_t s_vertexColorFormat;
+
+namespace {
+void DropQueuedVisibility(CMapChunk* chunk);
+}
+
 // VERIFY: ed4a5d5b manual
 // OFFSET: 0x00790520
 void CMapChunk::GetVertexPosition(int32_t index, C3Vector* pos) {
@@ -84,6 +94,8 @@ void CMapChunk::GetVertexPosition(int32_t index, C3Vector* pos) {
 // VERIFY: d0968beb manual
 // OFFSET: 0x007C3370
 void CMapChunk::Purge() {
+    DropQueuedVisibility(this);
+
     if (this->m_renderChunk) {
         CMap::FreeRenderChunk(this->m_renderChunk);
         this->m_renderChunk = nullptr;
@@ -247,18 +259,18 @@ void CMapChunk::InitializeVertexGrid() {
     C3Vector* vertex = CMapChunk::vertexList;
 
     for (int32_t row = 0; row < 9; row++) {
-        float x = row * -SMOLTILE_SIZE;
+        float x = row * -4.1666665f;
 
         for (int32_t col = 0; col < 9; col++) {
             vertex->x = x;
-            vertex->y = 0.0f - col * SMOLTILE_SIZE;
+            vertex->y = 0.0f - col * 4.1666665f;
             vertex++;
         }
 
         if (row < 8) {
             for (int32_t col = 0; col < 8; col++) {
-                vertex->x = x - HALF_SMOLTILE_SIZE;
-                vertex->y = 0.0f - col * SMOLTILE_SIZE - HALF_SMOLTILE_SIZE;
+                vertex->x = x - 2.0833333f;
+                vertex->y = 0.0f - col * 4.1666665f - 2.0833333f;
                 vertex++;
             }
         }
@@ -327,45 +339,280 @@ int16_t CMapChunk::CreateIndices(char* buf, int32_t baseVertex) {
     return totalIndices;
 }
 
-// VERIFY: 44a339cb manual
-// OFFSET: 0x007C3E70
-void __fastcall CWorldScene::AddMapChunk(CMapChunk* mapChunk) {
-    if (CWorldScene::FrustumCull(&mapChunk->m_bbox)) {
+namespace {
+
+struct VisRequest {
+    CMapChunk* chunk;
+    int32_t linkChunk;
+    int32_t wantLiquids;
+};
+
+struct VisSnapshot {
+    CFrustum frustum;
+    C4Plane camPlane;
+    C4Plane camPlaneXY;
+    C3Vector camTarget;
+    C3Vector activeView;
+    int32_t farCorner;
+    float camZ;
+    int32_t valid;
+};
+
+struct VisJob {
+    CMapChunk* chunk;
+    int32_t linkChunk;
+    float dist;
+    C3Vector corner;
+    uint32_t liquidBegin;
+    uint32_t liquidCount;
+};
+
+struct LiquidOut {
+    CChunkLiquid* liquid;
+    C3Vector corner;
+};
+
+static VisSnapshot s_visSnap;
+static std::vector<VisRequest> s_visQueue;
+// -- ʕ •ᴥ•ʔ✿ Flush swaps into these. clear() keeps the capacity for the next swap. ✿ ʕ •ᴥ•ʔ
+static std::vector<VisRequest> s_visRequests;
+static std::vector<VisJob> s_visJobs;
+static std::vector<LiquidOut> s_visLiquids;
+static VisSnapshot s_cachedSnap;
+static int32_t s_visCacheValid = 0;
+
+static int32_t SameVisibilityView(const VisSnapshot& a, const VisSnapshot& b) {
+    return memcmp(&a.frustum, &b.frustum, sizeof(CFrustum)) == 0
+        && memcmp(&a.camPlane, &b.camPlane, sizeof(C4Plane)) == 0
+        && memcmp(&a.camPlaneXY, &b.camPlaneXY, sizeof(C4Plane)) == 0
+        && memcmp(&a.camTarget, &b.camTarget, sizeof(C3Vector)) == 0
+        && memcmp(&a.activeView, &b.activeView, sizeof(C3Vector)) == 0
+        && a.farCorner == b.farCorner
+        && a.camZ == b.camZ;
+}
+
+static int32_t SameVisibilityRequests(const std::vector<VisRequest>& queue) {
+    if (queue.size() != s_visRequests.size()) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < queue.size(); ++i) {
+        if (queue[i].chunk != s_visRequests[i].chunk || queue[i].linkChunk != s_visRequests[i].linkChunk || queue[i].wantLiquids != s_visRequests[i].wantLiquids) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+void DropQueuedVisibility(CMapChunk* chunk) {
+    s_visCacheValid = 0;
+
+    for (size_t i = 0; i < s_visQueue.size();) {
+        if (s_visQueue[i].chunk == chunk) {
+            s_visQueue.erase(s_visQueue.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+
+    if (s_visQueue.empty()) {
+        s_visSnap.valid = 0;
+    }
+}
+
+static void CaptureVisibilitySnapshot() {
+    s_visSnap.frustum = CWorldScene::frustumStack[CWorldScene::frustumIndex];
+    s_visSnap.camPlane = CWorldScene::camPlane;
+    s_visSnap.camPlaneXY = CWorldScene::camPlaneXY;
+    s_visSnap.camTarget = CWorldScene::camTarget;
+    s_visSnap.activeView = CWorldScene::s_activeWorldView;
+    s_visSnap.farCorner = CMapChunk::farCornerIndex;
+    s_visSnap.camZ = CWorldScene::s_activeWorldView.z;
+    s_visSnap.valid = 1;
+}
+
+static void EnqueueVisibility(CMapChunk* chunk, int32_t linkChunk, int32_t wantLiquids) {
+    if (s_visQueue.empty() || !s_visSnap.valid) {
+        CaptureVisibilitySnapshot();
+    }
+
+    VisRequest req;
+    req.chunk = chunk;
+    req.linkChunk = linkChunk;
+    req.wantLiquids = wantLiquids;
+    s_visQueue.push_back(req);
+}
+
+static void LinkChunkBucket(CMapChunk* chunk, const C3Vector& pos, const C4Plane& planeXY) {
+    int32_t bucket = 0;
+    float distance = pos.y * planeXY.n.y + pos.z * planeXY.n.z + pos.x * planeXY.n.x + planeXY.d;
+
+    if (distance > 0.0f) {
+        bucket = CMath::fint_(distance * 0.029999999f - 0.5f);
+    }
+
+    if (bucket < 0) {
+        bucket = 0;
+    }
+
+    // ʕ •ᴥ•ʔ✿ Sixty-four buckets end near 2km. Full view still draws a loaded chunk past that ✿ ʕ •ᴥ•ʔ
+    if (bucket >= static_cast<int32_t>(kSortBuckets)) {
+        if (!CWorldParamSlider::ExtendedViewEnabled()) {
+            return;
+        }
+
+        bucket = static_cast<int32_t>(kSortBuckets) - 1;
+    }
+
+    CWorldScene::sortTable.m_table[bucket].m_mapChunkList.LinkToTail(chunk);
+}
+
+static void LinkLiquidBucket(CChunkLiquid* liquid, const C3Vector& pos, const C4Plane& planeXY) {
+    int32_t bucket = 0;
+    float distance = pos.y * planeXY.n.y + pos.z * planeXY.n.z + pos.x * planeXY.n.x + planeXY.d;
+
+    if (distance > 0.0f) {
+        float scaled = distance * 0.03f;
+        bucket = CMath::fint_(scaled - 0.5f);
+
+        if (bucket >= static_cast<int32_t>(kSortBuckets)) {
+            return;
+        }
+    }
+
+    CWorldScene::sortTable.m_table[bucket].m_liquidList.LinkToTail(liquid);
+}
+
+static void LinkJob(const VisJob& job, const C4Plane& planeXY) {
+    if (job.linkChunk) {
+        job.chunk->m_distToCamera = job.dist;
+        LinkChunkBucket(job.chunk, job.corner, planeXY);
+    }
+
+    for (uint32_t n = 0; n < job.liquidCount; ++n) {
+        const LiquidOut& out = s_visLiquids[job.liquidBegin + n];
+        LinkLiquidBucket(out.liquid, out.corner, planeXY);
+    }
+}
+
+static void LinkVisibilityResults(const VisSnapshot& snap) {
+    for (const VisJob& job : s_visJobs) {
+        LinkJob(job, snap.camPlaneXY);
+    }
+}
+
+// -- ʕ •ᴥ•ʔ✿ One serial bucket. CullChunks and CullLiquid own the frustum. ✿ ʕ •ᴥ•ʔ
+static void FillVisibilityBuckets(const VisSnapshot& snap) {
+    const int32_t index = CMapChunk::cornerVertexIndex[snap.farCorner];
+    const float vertX = CMapChunk::vertexList[index].x;
+    const float vertY = CMapChunk::vertexList[index].y;
+    const int32_t nearX = snap.camTarget.x >= snap.activeView.x;
+    const int32_t nearY = snap.camTarget.y >= snap.activeView.y;
+    const int32_t nearZ = snap.camTarget.z >= snap.activeView.z;
+    const float camZ = snap.camZ;
+
+    s_visJobs.resize(s_visRequests.size());
+    s_visLiquids.clear();
+
+    for (size_t i = 0; i < s_visRequests.size(); ++i) {
+        const VisRequest& req = s_visRequests[i];
+        CMapChunk* chunk = req.chunk;
+        VisJob& job = s_visJobs[i];
+        job.chunk = chunk;
+        job.linkChunk = req.linkChunk;
+        job.liquidBegin = static_cast<uint32_t>(s_visLiquids.size());
+        job.liquidCount = 0;
+
+        if (req.linkChunk) {
+            const CAaBox& box = chunk->m_bbox;
+            const float nx = nearX ? box.b.x : box.t.x;
+            const float ny = nearY ? box.b.y : box.t.y;
+            const float nz = nearZ ? box.b.z : box.t.z;
+            job.dist = snap.camPlane.n.z * nz + snap.camPlane.n.y * ny + snap.camPlane.n.x * nx + snap.camPlane.d;
+            job.corner.x = vertX + chunk->m_topLeftCoords.x;
+            job.corner.y = vertY + chunk->m_topLeftCoords.y;
+            job.corner.z = chunk->m_height[index] + chunk->m_topLeftCoords.z;
+        }
+
+        if (req.wantLiquids && chunk->m_liquidBounds.t.x >= chunk->m_liquidBounds.b.x) {
+            const float cornerX = vertX + chunk->m_topLeftCoords.x;
+            const float cornerY = vertY + chunk->m_topLeftCoords.y;
+
+            for (CChunkLiquid* liquid = chunk->m_liquidChunkLinkList.Head(); liquid; liquid = chunk->m_liquidChunkLinkList.Next(liquid)) {
+                const float top = liquid->m_height.y;
+                const float bottom = liquid->m_height.x;
+                LiquidOut out;
+                out.liquid = liquid;
+                out.corner.x = cornerX;
+                out.corner.y = cornerY;
+                out.corner.z = (camZ <= top ? camZ : top) < bottom ? bottom : (camZ > top ? top : camZ);
+                s_visLiquids.push_back(out);
+                ++job.liquidCount;
+            }
+        }
+
+        LinkJob(job, snap.camPlaneXY);
+    }
+}
+
+}
+
+void CMapChunk::SetVertexColorFormat(int32_t format) {
+    s_vertexColorFormat = format;
+}
+
+void CMapChunk::FlushQueuedVisibility() {
+    Profiler::Scope profile(Profiler::VisFlush);
+    if (s_visQueue.empty()) {
         return;
     }
 
-    C3Vector nearest(0.0f, 0.0f, 0.0f);
-    CWorldScene::GetNearestCornerToCamera(&mapChunk->m_bbox, &nearest);
-    float* height = mapChunk->m_height;
-    mapChunk->m_distToCamera = CWorldScene::camPlane.n.z * nearest.z + CWorldScene::camPlane.n.y * nearest.y + CWorldScene::camPlane.n.x * nearest.x + CWorldScene::camPlane.d;
+    VisSnapshot snap = s_visSnap;
+    s_visSnap.valid = 0;
 
-    int32_t index = CMapChunk::cornerVertexIndex[CMapChunk::farCornerIndex];
-    C3Vector corner;
-    corner.z = 0.0f;
-    corner.x = CMapChunk::vertexList[index].x + mapChunk->m_topLeftCoords.x;
-    corner.y = CMapChunk::vertexList[index].y + mapChunk->m_topLeftCoords.y;
-    corner.z = height[index] + mapChunk->m_topLeftCoords.z;
-    CWorldScene::AddMapChunkToRenderList(mapChunk, &corner);
+    // -- ʕ •ᴥ•ʔ✿ The sort lists are cleared every frame. A still camera only needs the links redone. ✿ ʕ •ᴥ•ʔ
+    if (s_visCacheValid && SameVisibilityView(snap, s_cachedSnap) && SameVisibilityRequests(s_visQueue)) {
+        s_visQueue.clear();
+        LinkVisibilityResults(snap);
+        return;
+    }
+
+    s_visRequests.swap(s_visQueue);
+    // -- ʕ •ᴥ•ʔ✿ The swap parks the previous frame in the queue. Leaving it there makes every moving frame append another full set. clear() keeps the capacity. ✿ ʕ •ᴥ•ʔ
+    s_visQueue.clear();
+    s_visCacheValid = 0;
+
+    FillVisibilityBuckets(snap);
+    s_cachedSnap = snap;
+    s_visCacheValid = 1;
+}
+
+// VERIFY: 44a339cb manual
+// OFFSET: 0x007C3E70
+void __fastcall CWorldScene::AddMapChunk(CMapChunk* mapChunk) {
+    // -- ʕ •ᴥ•ʔ✿ Queued for the distance bucket. CullChunks owns the frustum. ✿ ʕ •ᴥ•ʔ
+    EnqueueVisibility(mapChunk, 1, 0);
 }
 
 // VERIFY: d44747a1 manual
 // OFFSET: 0x007C3F30
 void CMapChunk::CreateVerticesWorld(CGxVertexPN* v, const C3Vector& offset) {
-    static float cols[9];
-    static float rows[9];
+    float cols[9];
+    float rows[9];
 
     float left = 17066.666f - this->m_cOffset.x * 33.333332f;
     float top = 17066.666f - this->m_cOffset.y * 33.333332f;
     rows[0] = top;
     cols[0] = left;
-    rows[1] = top - SMOLTILE_SIZE;
+    rows[1] = top - 4.1666665f;
     rows[2] = top - 8.333333f;
     rows[3] = top - 12.5f;
     rows[4] = top - 16.666666f;
     rows[5] = top - 20.833332f;
     rows[6] = top - 25.0f;
     rows[7] = top - 29.166666f;
-    cols[1] = left - SMOLTILE_SIZE;
+    cols[1] = left - 4.1666665f;
     cols[2] = left - 8.333333f;
     cols[3] = left - 12.5f;
     cols[4] = left - 16.666666f;
@@ -394,8 +641,8 @@ void CMapChunk::CreateVerticesWorld(CGxVertexPN* v, const C3Vector& offset) {
 
         if (row < 8) {
             for (int32_t col = 0; col < 8; col++) {
-                v->m_position.x = rows[row] - HALF_SMOLTILE_SIZE;
-                v->m_position.y = cols[col] - HALF_SMOLTILE_SIZE;
+                v->m_position.x = rows[row] - 2.0833333f;
+                v->m_position.y = cols[col] - 2.0833333f;
                 v->m_position.z = this->m_topLeftCoords.z + height[col];
                 v->m_normal.x = normals[3 * col + 0] * 0.0078740157f;
                 v->m_normal.y = normals[3 * col + 1] * 0.0078740157f;
@@ -412,21 +659,21 @@ void CMapChunk::CreateVerticesWorld(CGxVertexPN* v, const C3Vector& offset) {
 // VERIFY: 6a9c0ba2 manual
 // OFFSET: 0x007C4620
 void CMapChunk::CreateVerticesWorld(CGxVertexPNC* v, const C3Vector& offset) {
-    static float cols[9];
-    static float rows[9];
+    float cols[9];
+    float rows[9];
 
     float left = 17066.666f - this->m_cOffset.x * 33.333332f;
     float top = 17066.666f - this->m_cOffset.y * 33.333332f;
     rows[0] = top;
     cols[0] = left;
-    rows[1] = top - SMOLTILE_SIZE;
+    rows[1] = top - 4.1666665f;
     rows[2] = top - 8.333333f;
     rows[3] = top - 12.5f;
     rows[4] = top - 16.666666f;
     rows[5] = top - 20.833332f;
     rows[6] = top - 25.0f;
     rows[7] = top - 29.166666f;
-    cols[1] = left - SMOLTILE_SIZE;
+    cols[1] = left - 4.1666665f;
     cols[2] = left - 8.333333f;
     cols[3] = left - 12.5f;
     cols[4] = left - 16.666666f;
@@ -453,7 +700,7 @@ void CMapChunk::CreateVerticesWorld(CGxVertexPNC* v, const C3Vector& offset) {
 
             if (!this->m_vertexShading) {
                 color = 0xFF7F7F7F;
-            } else if (g_theGxDevicePtr->Caps().m_colorFormat == GxCF_rgba) {
+            } else if (s_vertexColorFormat == GxCF_rgba) {
                 const uint8_t* src = reinterpret_cast<const uint8_t*>(shading);
                 color = src[2] | (src[1] << 8) | (src[0] << 16) | (static_cast<uint32_t>(src[3]) << 24);
             } else {
@@ -469,8 +716,8 @@ void CMapChunk::CreateVerticesWorld(CGxVertexPNC* v, const C3Vector& offset) {
 
         if (row < 8) {
             for (int32_t col = 0; col < 8; col++) {
-                v->m_position.x = rows[row] - HALF_SMOLTILE_SIZE;
-                v->m_position.y = cols[col] - HALF_SMOLTILE_SIZE;
+                v->m_position.x = rows[row] - 2.0833333f;
+                v->m_position.y = cols[col] - 2.0833333f;
                 v->m_position.z = this->m_topLeftCoords.z + *height;
                 v->m_normal.x = normals[0] * 0.0078740157f;
                 v->m_normal.y = normals[1] * 0.0078740157f;
@@ -480,7 +727,7 @@ void CMapChunk::CreateVerticesWorld(CGxVertexPNC* v, const C3Vector& offset) {
 
                 if (!this->m_vertexShading) {
                     color = 0xFF7F7F7F;
-                } else if (g_theGxDevicePtr->Caps().m_colorFormat == GxCF_rgba) {
+                } else if (s_vertexColorFormat == GxCF_rgba) {
                     const uint8_t* src = reinterpret_cast<const uint8_t*>(shading);
                     color = src[2] | (src[1] << 8) | (src[0] << 16) | (static_cast<uint32_t>(src[3]) << 24);
                 } else {
@@ -568,7 +815,7 @@ void CMapChunk::CreateVerticesLocal(CGxVertexPNC* v) {
             if (this->m_vertexShading) {
                 CImVector color = *reinterpret_cast<CImVector*>(shading);
 
-                if (g_theGxDevicePtr->Caps().m_colorFormat == GxCF_rgba) {
+                if (s_vertexColorFormat == GxCF_rgba) {
                     CImVector swapped;
                     swapped.b = color.r;
                     swapped.g = color.g;
@@ -602,7 +849,7 @@ void CMapChunk::CreateVerticesLocal(CGxVertexPNC* v) {
                 if (this->m_vertexShading) {
                     CImVector color = *reinterpret_cast<CImVector*>(shading);
 
-                    if (g_theGxDevicePtr->Caps().m_colorFormat == GxCF_rgba) {
+                    if (s_vertexColorFormat == GxCF_rgba) {
                         CImVector swapped;
                         swapped.b = color.r;
                         swapped.g = color.g;
@@ -868,23 +1115,12 @@ void CMapChunk::CreateLiquids(bool a3) {
 // VERIFY: 2c9fa8ff manual
 // OFFSET: 0x007C5B20
 void CMapChunk::CullAndBucketChunk() {
-    if (this->m_liquidBounds.t.x < this->m_liquidBounds.b.x || CWorldScene::FrustumCull(&this->m_liquidBounds)) {
+    if (!s_visQueue.empty() && s_visQueue.back().chunk == this) {
+        s_visQueue.back().wantLiquids = 1;
         return;
     }
 
-    int32_t index = CMapChunk::cornerVertexIndex[CMapChunk::farCornerIndex];
-    float camZ = CWorldScene::s_activeWorldView.z;
-    C3Vector corner(CMapChunk::vertexList[index].x + this->m_topLeftCoords.x, CMapChunk::vertexList[index].y + this->m_topLeftCoords.y, this->m_height[index] + this->m_topLeftCoords.z);
-
-    for (CChunkLiquid* liquid = this->m_liquidChunkLinkList.Head(); liquid; liquid = this->m_liquidChunkLinkList.Next(liquid)) {
-        CAaBox box;
-        liquid->GetAaBox(box);
-
-        if (!CWorldScene::FrustumCull(&box)) {
-            corner.z = (camZ <= liquid->m_height.y ? camZ : liquid->m_height.y) < liquid->m_height.x ? liquid->m_height.x : (camZ > liquid->m_height.y ? liquid->m_height.y : camZ);
-            CWorldScene::AddToDistanceBucket(liquid, corner);
-        }
-    }
+    EnqueueVisibility(this, 0, 1);
 }
 
 // VERIFY: 555895ad manual
@@ -926,6 +1162,8 @@ CMapChunk::CMapChunk() {
     this->m_liquid = nullptr;
     this->m_soundEmitters = nullptr;
     this->m_bLoaded = 0;
+    this->m_cullStamp = -1;
+    this->m_cullVisible = 0;
 }
 
 // VERIFY: ecd160bb manual
@@ -987,7 +1225,7 @@ void CMapChunk::CreateRefs(CMapArea* area, uint32_t* mcrfPtr, uint32_t doodadRef
 
             if (proxy.m_sphere.r < 0.001f) {
                 proxy.m_sphere.r = 50.0f;
-                SysMsgPrintf(SYSMSG_ERROR, 2, "Destructible building WMO(%s) has invalid geobox", &area->m_wmoFileNames[area->m_wmoFilenamesOffsets[def->m_nameId]]);
+                SysMsgPrintf(STATUS_ERROR, 2, "Destructible building WMO(%s) has invalid geobox", &area->m_wmoFileNames[area->m_wmoFilenamesOffsets[def->m_nameId]]);
             }
 
             World::FindOrCreateDestructibleProxy(&proxy);
@@ -1164,8 +1402,8 @@ void CMapChunk::CreateDetailDoodads() {
             shadeCenter = shadeCorner + 9 * sizeof(uint32_t);
         }
 
-        float offsetX = y * -SMOLTILE_SIZE;
-        float offsetY = x * -SMOLTILE_SIZE;
+        float offsetX = y * -4.1666665f;
+        float offsetY = x * -4.1666665f;
 
         verts[0] = C3Vector(CMap::s_subchunkCoords[4].x + offsetX, CMap::s_subchunkCoords[4].y + offsetY, CMap::s_subchunkCoords[4].z);
         verts[0].z = height[9];
@@ -1251,15 +1489,15 @@ void CMapChunk::CreateDetailDoodads() {
         }
 
         uint32_t cellBase = 4 * (x + 8 * y);
-        float cellX = x * SMOLTILE_SIZE;
-        float cellY = y * SMOLTILE_SIZE;
+        float cellX = x * 4.1666665f;
+        float cellY = y * 4.1666665f;
 
         for (uint32_t j = 0; j < count; j++) {
             float u = CRandom::sfloat_(seed);
             float v = CRandom::sfloat_(seed);
             uint32_t id = doodads[(i + j) & 15];
-            float px = u * HALF_SMOLTILE_SIZE + HALF_SMOLTILE_SIZE;
-            float py = v * HALF_SMOLTILE_SIZE + HALF_SMOLTILE_SIZE;
+            float px = u * 2.0833333f + 2.0833333f;
+            float py = v * 2.0833333f + 2.0833333f;
 
             if (!id) {
                 continue;
@@ -1276,7 +1514,7 @@ void CMapChunk::CreateDetailDoodads() {
                 tri = 1;
             }
 
-            if (px - SMOLTILE_SIZE - -py > 0.0f) {
+            if (px - 4.1666665f - -py > 0.0f) {
                 tri += 2;
             }
 
@@ -1330,9 +1568,9 @@ void CMapChunk::CreateDetailDoodads() {
             color.a = 0xFF;
 
             if (this->m_shadowMap) {
-                float shadowX = (px + cellX) * OO_COORD_TO_SHADOW;
+                float shadowX = (px + cellX) * 1.92f;
                 int32_t sx = CMath::fint_(shadowX - 0.5f);
-                float shadowY = (py + cellY) * OO_COORD_TO_SHADOW;
+                float shadowY = (py + cellY) * 1.92f;
                 int32_t sy = CMath::fint_(shadowY - 0.5f);
 
                 if (this->m_shadowMap[8 * sy + (sx >> 3)] & (1 << (sx & 7))) {

@@ -396,14 +396,14 @@ TEXFILETYPE TextureDiscoverFileType(const char* fileName) {
     const char* extension = SStrChrR(const_cast<char*>(fileName), '.');
 
     if (!extension || SStrLen(extension) != 4) {
-        return TEXFILETYPE_UNKNOWN;
+        return TEXFILE_UNKNOWN;
     }
 
     if (!SStrCmpI(extension, ".TGA", STORM_MAX_STR)) {
-        return TEXFILETYPE_TGA;
+        return TEXFILE_TGA;
     }
 
-    return SStrCmpI(extension, ".BLP", STORM_MAX_STR) ? TEXFILETYPE_UNKNOWN : TEXFILETYPE_BLP;
+    return SStrCmpI(extension, ".BLP", STORM_MAX_STR) ? TEXFILE_UNKNOWN : TEXFILE_BLP;
 }
 
 // VERIFY: 813fa654 manual
@@ -414,7 +414,7 @@ TEXFILETYPE TexturePickAlternateFilename(const char* fileName, TEXFILETYPE type,
     }
 
     if (!type) {
-        return TEXFILETYPE_UNKNOWN;
+        return TEXFILE_UNKNOWN;
     }
 
     char* extension = SStrChrR(buffer, '.');
@@ -423,14 +423,14 @@ TEXFILETYPE TexturePickAlternateFilename(const char* fileName, TEXFILETYPE type,
         *extension = '\0';
     }
 
-    if (type == TEXFILETYPE_TGA) {
+    if (type == TEXFILE_TGA) {
         SStrPack(buffer, ".BLP", size);
-        return TEXFILETYPE_BLP;
+        return TEXFILE_BLP;
     }
 
-    if (type == TEXFILETYPE_BLP) {
+    if (type == TEXFILE_BLP) {
         SStrPack(buffer, ".TGA", size);
-        return TEXFILETYPE_TGA;
+        return TEXFILE_TGA;
     }
 
     return type;
@@ -516,7 +516,7 @@ void ResolveMipLevel(EGxTexCommand command, uint32_t width, uint32_t height, uin
     // STATIC: 0x00B4A1E8
     static uint32_t s_emptyTexel;
 
-    if (command == GxTex_Recreate) {
+    if (command == GxTex_3) {
         return;
     }
 
@@ -654,7 +654,7 @@ int32_t TextureLoadBlpMips(char* fileName, char* extension, int32_t flags, MipBi
     EGxTexFormat format = GxTex_Argb8888;
     PIXEL_FORMAT pixels = PIXEL_ARGB8888;
 
-    if (image.m_header.m_colorEncoding == COLOR_DXT) {
+    if (image.m_header.m_colorEncoding == 2) {
         pixels = static_cast<PIXEL_FORMAT>(image.m_header.m_preferredFormat);
 
         if (pixels == PIXEL_DXT1) {
@@ -1320,7 +1320,8 @@ CGxTex* TextureGetGxTex(CTexture* texture, int32_t wait, CStatus* status) {
                 texture->m_atlas->Reload();
             }
 
-            return texture->m_atlas->m_gxTex;
+            CGxTex* atlasTex = texture->m_atlas->m_gxTex;
+            return atlasTex && GxCpuPtrOk(atlasTex) ? atlasTex : nullptr;
         }
     }
 
@@ -1340,7 +1341,8 @@ CGxTex* TextureGetGxTex(CTexture* texture, int32_t wait, CStatus* status) {
         }
     }
 
-    return texture->m_gxTex;
+    CGxTex* gxTex = texture->m_gxTex;
+    return gxTex && GxCpuPtrOk(gxTex) ? gxTex : nullptr;
 }
 
 // VERIFY: 9761fb06 manual
@@ -1896,7 +1898,7 @@ void TextureInitialize() {
     s_currentTime = OsGetAsyncTimeMs();
     s_gxTexCacheSize = 0;
     s_gxTexCacheMaxSize = 0;
-    EventRegisterEx(EVENT_ID_POLL, TextureUpdate, nullptr, EVENT_PRIORITY_NORMAL);
+    EventRegisterEx(EVENT_ID_POLL, TextureUpdate, nullptr, 0.0f);
 }
 
 // VERIFY: 7711ba71 manual

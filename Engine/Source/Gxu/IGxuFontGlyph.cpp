@@ -1,20 +1,76 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cwctype>
 #include "Engine/Source/Gxu/IGxuFontGlyph.h"
 #include "Engine/Source/Gxu/GxuFontMiscClasses.h"
 #include "Engine/Source/Storm/H/storm.h"
 
+// ʕ ● ᴥ ●ʔ CJK MPQ fonts set isFixedPitch with a bogus hhea.advanceWidthMax; use per-glyph advance (SatyPardus/wowdecomp d4e9b1a, Kissinger Zhou)
+static uint32_t GxuFontBitmapLoadFlags(bool monochrome, FT_Face face) {
+    uint32_t flags = FT_LOAD_LINEAR_DESIGN | FT_LOAD_PEDANTIC | FT_LOAD_NO_HINTING;
+
+    if (monochrome) {
+        flags |= FT_LOAD_CROP_BITMAP;
+    } else {
+        flags |= FT_LOAD_NO_BITMAP;
+    }
+
+    if (face && FT_IS_FIXED_WIDTH(face)) {
+        flags |= FT_LOAD_IGNORE_GLOBAL_ADVANCE_WIDTH;
+    }
+
+    return flags;
+}
+
+bool GxuFontGlyphIsLayoutWhitespace(uint32_t code) {
+    if (code == 0x3000) {
+        return true;
+    }
+
+    return code <= 0x7F && iswspace(static_cast<wint_t>(code)) != 0;
+}
+
+double GxuFontGlyphAdvancePixels(FT_Face face, uint32_t code) {
+    (void)code;
+    return static_cast<double>(face->glyph->metrics.horiAdvance) / 64.0 + 1.0;
+}
+
 // VERIFY: fff26b99 manual
 // OFFSET: 0x006C8C10
-static int32_t FREETYPE_RenderGlyph(FT_Face face, uint32_t code, bool monochrome) {
+static int32_t FREETYPE_LoadGlyph(FT_Face face, uint32_t code, bool monochrome) {
     FT_UInt index = FT_Get_Char_Index(face, code);
 
-    if (!index || FT_Load_Glyph(face, index, monochrome ? FT_LOAD_LINEAR_DESIGN | FT_LOAD_PEDANTIC | FT_LOAD_CROP_BITMAP | FT_LOAD_NO_HINTING : FT_LOAD_LINEAR_DESIGN | FT_LOAD_PEDANTIC | FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING)) {
+    if (!index || FT_Load_Glyph(face, index, GxuFontBitmapLoadFlags(monochrome, face))) {
         return 0;
     }
 
-    return FT_Render_Glyph(face->glyph, static_cast<FT_Render_Mode>(monochrome)) == FT_Err_Ok;
+    return 1;
+}
+
+static int32_t FREETYPE_RenderGlyph(FT_Face face, uint32_t code, bool monochrome) {
+    if (!FREETYPE_LoadGlyph(face, code, monochrome)) {
+        return 0;
+    }
+
+    return FT_Render_Glyph(face->glyph, static_cast<FT_Render_Mode>(monochrome)) == 0;
+}
+
+bool GxuFontGlyphQueryAdvance(FT_Face face, uint32_t pixelSize, uint32_t code, bool monochrome, double* advance) {
+    if (!face || !pixelSize || !advance) {
+        return false;
+    }
+
+    if (FT_Set_Pixel_Sizes(face, pixelSize, 0)) {
+        return false;
+    }
+
+    if (!FREETYPE_LoadGlyph(face, code, monochrome)) {
+        return false;
+    }
+
+    *advance = GxuFontGlyphAdvancePixels(face, code);
+    return true;
 }
 
 // VERIFY: d81e8b25 manual
@@ -58,6 +114,10 @@ bool IGxuFontGlyphRenderGlyph(FT_Face face, uint32_t pixelSize, uint32_t code, u
     }
 
     if (!FT_Get_Char_Index(face, code)) {
+        return false;
+    }
+
+    if (FT_Set_Pixel_Sizes(face, pixelSize, 0)) {
         return false;
     }
 
@@ -107,7 +167,7 @@ bool IGxuFontGlyphRenderGlyph(FT_Face face, uint32_t pixelSize, uint32_t code, u
     dataPtr->m_data = data;
     dataPtr->m_glyphWidth = width;
     dataPtr->m_glyphHeight = height;
-    dataPtr->m_glyphAdvance = (face->glyph->metrics.horiAdvance / 64) + 1.0;
+    dataPtr->m_glyphAdvance = GxuFontGlyphAdvancePixels(face, code);
     dataPtr->m_yOffset = 0;
     dataPtr->m_yStart = 0;
     dataPtr->m_glyphBearing = face->glyph->metrics.horiBearingX * (1.0 / 64.0);

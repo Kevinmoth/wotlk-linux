@@ -22,7 +22,7 @@
 #include "WoW/Source/Ui/BattlenetUI.h"
 #include "WoW/Source/Ui/GameUI.h"
 #include "WoW/Source/WowServices/LoginResponse.h"
-#include "GameVersion.h"
+#include "WoW/Source/WowServices/WowConnectionNet.h"
 
 // STATIC: 0x00B24B94
 BattlenetAllocator s_battlenetAllocator;
@@ -62,6 +62,10 @@ bool BattlenetApplication::Send(uint32_t connection, const void* data, uint32_t 
         SErrDisplayAppFatalMessage("", "", 0);
     }
 
+    if (!this->m_wowConnection) {
+        return false;
+    }
+
     return this->m_wowConnection->Send(static_cast<uint8_t*>(const_cast<void*>(data)), size, true);
 }
 
@@ -77,6 +81,9 @@ BattlenetApplication::~BattlenetApplication() {
     if (this->m_wowConnection) {
         this->m_wowConnection->Disconnect();
         this->m_wowConnection->SetResponse(nullptr, false);
+        if (WowConnection::s_network && this->m_wowConnection->m_netLink.IsLinked()) {
+            WowConnection::s_network->Remove(this->m_wowConnection);
+        }
         this->m_wowConnection->Release();
         this->m_wowConnection = nullptr;
     }
@@ -261,12 +268,12 @@ static void GetComponentVersion(const char* name, uint32_t& version, const char*
 // VERIFY: 13a1fff7 auto
 // OFFSET: 0x008C5C50
 static uint32_t GetWowDataVersion() {
-    uint32_t version = GAME_BUILD;
+    uint32_t version = 12340;
     void* data;
     uint32_t size;
 
     if (!SFileLoadFileEx(nullptr, "component.wow-data.txt", &data, &size, 0, 0, nullptr) || !data) {
-        return GAME_BUILD;
+        return 12340;
     }
 
     GetComponentVersion("wow-data", version, static_cast<const char*>(data), size);
@@ -281,7 +288,7 @@ static uint32_t GetWowLangVersion(const char* locale) {
     char path[256];
     char fileName[32];
     char componentName[32];
-    uint32_t version = GAME_BUILD;
+    uint32_t version = 12340;
     SArchive* archive = nullptr;
 
     if (SStrCmp(locale, s_localeCode, STORM_MAX_STR)) {
@@ -296,7 +303,7 @@ static uint32_t GetWowLangVersion(const char* locale) {
         }
 
         if (!SFile::OpenArchive(path, 0, 0x800, &archive)) {
-            return GAME_BUILD;
+            return 12340;
         }
     }
 
@@ -310,7 +317,7 @@ static uint32_t GetWowLangVersion(const char* locale) {
             SFile::CloseArchive(archive);
         }
 
-        return GAME_BUILD;
+        return 12340;
     }
 
     sprintf(componentName, "wow-%s", locale);
@@ -454,7 +461,6 @@ void BattlenetLogin::LogConnectionStatus(const char* format, ...) {
         va_start(args, format);
         SStrVPrintf(buffer, sizeof(buffer), format, args);
         CGlueMgr::LogConnectionStatus(buffer);
-        va_end(args);
     }
 }
 
@@ -739,12 +745,12 @@ Battlenet::TumorManager* BattlenetLogin::CreateTumorManager() {
         Battlenet::Authentication::Component* component = settings.m_components.New();
         component->m_program = BSN::FourCC(program);
         component->m_platform = BSN::FourCC(BattlenetLogin::s_monolithicPlatform);
-        component->m_version = GAME_BUILD;
+        component->m_version = 12340;
     } else {
         Battlenet::Authentication::Component* component = settings.m_components.New();
         component->m_program = BSN::FourCC(program);
         component->m_platform = BSN::FourCC("Win");
-        component->m_version = GAME_BUILD;
+        component->m_version = 12340;
 
         component = settings.m_components.New();
         component->m_program = BSN::FourCC("WoW");
@@ -753,7 +759,7 @@ Battlenet::TumorManager* BattlenetLogin::CreateTumorManager() {
 
         uint32_t localeCount = 0;
 
-        for (int32_t i = 0; i < NUM_DB_LOCALES; i++) {
+        for (int32_t i = 0; i < 12; i++) {
             if (g_hasIsoLocale[i]) {
                 component = settings.m_components.New();
                 component->m_program = BSN::FourCC("WoW");
@@ -1046,6 +1052,12 @@ void BattlenetLogin::QueueEvent(BN_EVENT_ID id, void* data, int32_t size) {
     this->m_eventLock.Enter();
 
     BN_EVENT* event = this->m_events[this->m_eventIndex].NewNode(2, 0, 0);
+
+    if (!event) {
+        this->m_eventLock.Leave();
+        return;
+    }
+
     event->m_data = data;
     event->m_id = id;
     event->m_size = size;
