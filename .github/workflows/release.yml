@@ -72,7 +72,7 @@ jobs:
   publish:
     if: >-
       always() &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/port/linux' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') &&
       needs.linux-x64.result == 'success' &&
       needs.windows-x64.result == 'success'
     needs: [linux-x64, windows-x64]
