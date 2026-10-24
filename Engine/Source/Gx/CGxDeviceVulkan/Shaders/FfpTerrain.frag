@@ -4,7 +4,7 @@
 
 #include "FfpUniforms.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D terrainTextures[];
+layout(set = 1, binding = 0) uniform sampler2D terrainTextures[65536]; // fixed bound for DXIL/Dozen; matches TerrainSlots in CGxDeviceVulkan.h
 
 layout(location = 0) in vec4 inColor;
 layout(location = 1) in vec3 inTexCoord0;

@@ -37,3 +37,26 @@ On top of the import, gromchek's fixes (upstream PR #34) were re-applied:
 - On any visual or stability issue on Linux, first check whether it reproduces
   in RosemyneH's own client (their CI binary) to tell fork defects from our
   changes; record anything confirmed here.
+
+## WSL / Dozen (dzn) environment limits - 2026-10-24
+
+The terrain pipeline uses a bindless combined-image-sampler array of
+`TerrainSlots = 65536` (update-after-bind + descriptor indexing). Two walls
+were confirmed while testing on WSL:
+
+1. Dozen's DXIL compiler asserts on undeclared resource ranges. Fixed in
+   this fork by declaring the bound in `FfpTerrain.frag`; semantically
+   identical for real drivers.
+2. D3D12 hard-caps shader-visible SAMPLER heaps (~2048 descriptors), so
+   the 65536-sampler terrain set can never be hosted by Dozen
+   (`dzn_descriptor_heap_pool_alloc_slots` assert at world load). This is
+   a limit of the D3D12 programming model, not a Mesa bug.
+
+Consequences:
+- Without the NVIDIA WSL Vulkan ICD (absent from this machine's stripped
+  Windows driver), the only working device on WSL is llvmpipe (software):
+  fully playable, ~4 FPS in-world.
+- A standard NVIDIA driver install (with WSL graphics components) provides
+  the native Vulkan ICD inside WSL and removes both walls.
+- Native Linux remains the performance target: Mesa (RADV/ANV) and the
+  NVIDIA driver both support the bindless terrain design as-is.
