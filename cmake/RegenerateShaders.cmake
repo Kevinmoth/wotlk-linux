@@ -9,6 +9,13 @@ string(FIND "${VERSION_OUT}" "${EXPECTED_VERSION}" VERSION_AT)
 file(READ "${CMAKE_CURRENT_LIST_DIR}/../Engine/Source/Gx/CGxDeviceVulkan/Shaders/spirv.version" EXPECTED_SPIRV)
 string(STRIP "${EXPECTED_SPIRV}" EXPECTED_SPIRV)
 string(FIND "${VERSION_OUT}" "${EXPECTED_SPIRV}" SPIRV_AT)
+# The pinned SDK's glslc does not print the SDK version in its --version output
+# (upstream's generated-drift workflow has been failing on every shader-touching
+# push because of this). Accept the pin in the tool path as well: the workflow
+# keeps the versioned SDK directory, so the path carries the pin.
+if (SPIRV_AT EQUAL -1)
+    string(FIND "${GLSLC}" "${EXPECTED_SPIRV}" SPIRV_AT)
+endif ()
 if (VERSION_AT EQUAL -1 OR SPIRV_AT EQUAL -1)
     message(FATAL_ERROR "glslc version mismatch: need ${EXPECTED_VERSION}, got: ${VERSION_OUT}")
 endif ()
