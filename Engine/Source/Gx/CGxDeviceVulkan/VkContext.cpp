@@ -227,6 +227,22 @@ int32_t VkContext::FinishCreateDevice() {
     this->m_features.drawIndirectFirstInstance = supported.drawIndirectFirstInstance;
     this->m_bindless = indexingSupported.shaderSampledImageArrayNonUniformIndexing && indexingSupported.descriptorBindingPartiallyBound && indexingSupported.descriptorBindingSampledImageUpdateAfterBind && indexingSupported.runtimeDescriptorArray;
 
+    // ʕ •ᴥ•ʔ✿ D3D12-backed Vulkan (Mesa Dozen, the WSL GPU-PV path) caps shader-visible sampler
+    // heaps at 2048 descriptors (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE) while still reporting
+    // the descriptor-indexing features. The bindless terrain set binds TerrainSlots = 65536
+    // combined image samplers, which no D3D12 sampler heap can host: the terrain pool allocation
+    // aborts at world load. Ask the driver who it is and fall back to the multipass terrain path.
+    // Real Vulkan drivers (NVIDIA, RADV, ANV, llvmpipe) host the set as designed. ✿ ʕ •ᴥ•ʔ
+    VkPhysicalDeviceDriverProperties driverProperties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+    VkPhysicalDeviceProperties2 deviceProperties2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+    deviceProperties2.pNext = &driverProperties;
+    vkGetPhysicalDeviceProperties2(this->m_physicalDevice, &deviceProperties2);
+
+    if (this->m_bindless && driverProperties.driverID == VK_DRIVER_ID_MESA_DOZEN) {
+        std::fprintf(stderr, "vulkan: Dozen driver: D3D12 sampler heap caps at 2048, using the multipass terrain path\n");
+        this->m_bindless = 0;
+    }
+
     float priority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
     queueInfo.queueFamilyIndex = this->m_queueFamily;

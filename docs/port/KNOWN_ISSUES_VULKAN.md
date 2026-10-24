@@ -84,3 +84,12 @@ Paths forward, all open:
 - llvmpipe: works today end to end, ~4 FPS in-world.
 - Native Linux (dual boot / USB / second disk): the port's actual target;
   full Vulkan where the bindless design is supported as-is.
+
+## Result after the Dozen fallback fix - 2026-10-24
+
+With the multipass terrain path active on Dozen, the world loads
+reliably (previously a deterministic crash). Measured on WSL/Dozen +
+GTX 1650, same data and settings: ~20 FPS in-world, versus ~4 on
+llvmpipe and ~380 on the same machine's Windows client. Minor visual
+glitches observed under Dozen, pending review. WSLg adds presentation
+latency; native Linux remains the performance target.
