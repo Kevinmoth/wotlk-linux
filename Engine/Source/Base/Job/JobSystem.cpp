@@ -28,6 +28,23 @@ struct Pool {
     std::atomic<uint32_t> next{0};
     std::atomic<uint32_t> remaining{0};
     bool active = false;
+
+    // -- ʕ •ᴥ•ʔ✿ StormExit() calls exit() directly, so the pool must join its own threads or std::terminate fires. ✿ ʕ •ᴥ•ʔ
+    ~Pool() {
+        std::vector<std::thread> pending;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            shutdown = true;
+            cv.notify_all();
+            pending.swap(threads);
+        }
+
+        for (std::thread& thread : pending) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    }
 };
 
 Pool g_pool;

@@ -124,16 +124,33 @@ int32_t VkContext::CreateInstance(const char* const* extensions, uint32_t extens
 
 #if defined(_WIN32)
     if (volkInitialize() != VK_SUCCESS) {
+        std::fprintf(stderr, "vulkan: could not load the Vulkan loader (vulkan-1.dll).\n");
         return 0;
     }
 #else
-    volkInitializeCustom(reinterpret_cast<PFN_vkGetInstanceProcAddr>(OsGuiGetVulkanProcAddr()));
+    PFN_vkGetInstanceProcAddr getInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(OsGuiGetVulkanProcAddr());
+    if (!getInstanceProcAddr) {
+        std::fprintf(stderr, "vulkan: could not get vkGetInstanceProcAddr from the Vulkan loader (libvulkan.so.1) or no driver provides VK_KHR_surface. Install 'vulkan-icd-loader' and a GPU driver (vulkan-radeon, vulkan-intel, nvidia-utils or vulkan-nouveau), then check 'vulkaninfo --summary'.\n");
+        return 0;
+    }
+
+    volkInitializeCustom(getInstanceProcAddr);
     if (!vkCreateInstance) {
+        std::fprintf(stderr, "vulkan: the Vulkan loader does not expose vkCreateInstance. Reinstall 'vulkan-icd-loader'.\n");
         return 0;
     }
 #endif
 
-    if (vkCreateInstance(&info, nullptr, &this->m_instance) != VK_SUCCESS) {
+    VkResult instanceResult = vkCreateInstance(&info, nullptr, &this->m_instance);
+    if (instanceResult != VK_SUCCESS) {
+        if (instanceResult == VK_ERROR_EXTENSION_NOT_PRESENT) {
+            std::fprintf(stderr, "vulkan: a required window extension is missing (VK_ERROR_EXTENSION_NOT_PRESENT). Check 'vulkaninfo --summary'.\n");
+        } else if (instanceResult == VK_ERROR_INCOMPATIBLE_DRIVER) {
+            std::fprintf(stderr, "vulkan: no compatible Vulkan driver was found (VK_ERROR_INCOMPATIBLE_DRIVER). Install your GPU driver and check 'vulkaninfo --summary'.\n");
+        } else {
+            std::fprintf(stderr, "vulkan: vkCreateInstance failed (VkResult %d). Check 'vulkaninfo --summary'.\n", static_cast<int>(instanceResult));
+        }
+
         return 0;
     }
 
@@ -190,6 +207,12 @@ int32_t VkContext::CreateDevice(VkSurfaceKHR surface) {
     });
 
     if (candidates.empty()) {
+        if (devices.empty()) {
+            std::fprintf(stderr, "vulkan: no GPU with Vulkan support was detected. Install your GPU driver (vulkan-radeon, vulkan-intel, nvidia-utils or vulkan-nouveau).\n");
+        } else {
+            std::fprintf(stderr, "vulkan: no GPU offers a graphics queue that can present to this window. Check your display session and driver with 'vulkaninfo --summary'.\n");
+        }
+
         return 0;
     }
 

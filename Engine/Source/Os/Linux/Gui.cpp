@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdio>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include "Engine/Source/Os/Gui.h"
@@ -317,6 +318,9 @@ int32_t OsGuiMessageBox(void* parentWindow, int32_t style, const char* message, 
     enum { RESULT_YES = 0, RESULT_NO = 1, RESULT_CANCEL = 2 };
 
     if (!SDL_WasInit(SDL_INIT_VIDEO)) {
+        // -- ʕ •ᴥ•ʔ✿ Startup errors (missing/corrupt data) happen before video init: still show them. ✿ ʕ •ᴥ•ʔ
+        std::fprintf(stderr, "%s: %s\n", title ? title : "World of Warcraft", message ? message : "");
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title ? title : "World of Warcraft", message ? message : "", nullptr);
         return RESULT_CANCEL;
     }
 

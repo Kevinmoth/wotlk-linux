@@ -1455,6 +1455,15 @@ static void OpenArchives() {
 
                 char title[256];
                 SStrCopy(title, "Missing or corrupted data", STORM_MAX_STR);
+                // -- ʕ •ᴥ•ʔ✿ Linux is case-sensitive: print the exact path so a mis-cased Data/ or .MPQ is obvious. ✿ ʕ •ᴥ•ʔ
+                char displayPath[260];
+                SStrCopy(displayPath, path, sizeof(displayPath));
+                for (char* cursor = displayPath; *cursor; cursor++) {
+                    if (*cursor == '\\') {
+                        *cursor = '/';
+                    }
+                }
+                std::fprintf(stderr, "%s: %s (looked for: %s)\n", title, message, displayPath);
                 OsGuiMessageBox(OsGuiGetWindow(2), 0, message, title);
                 StormExit(SErrGetLastError());
             }

@@ -37,13 +37,83 @@ jobs:
       - name: Build WowClient
         run: cmake --build build/linux --target WowClient -j"$(nproc)"
 
+      - name: Verify ABI floor
+        run: |
+          set -euo pipefail
+          max_glibc=$(objdump -T bin/Linux/WowClient64 | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+          echo "Max required symbol: $max_glibc"
+          # Arch estable trae glibc 2.44. No subir el piso por encima de 2.43 sin actualizar la guia.
+          if [ "$(printf '%s\n%s\n' "$max_glibc" "GLIBC_2.43" | sort -V | tail -1)" != "GLIBC_2.43" ]; then
+            echo "::error::El binario exige $max_glibc, mayor que el piso soportado GLIBC_2.43"
+            exit 1
+          fi
+
       - name: Package
-        run: tar czf wowdecomp-linux-x86_64.tar.gz -C bin/Linux WowClient64
+        run: |
+          set -euo pipefail
+          stage="dist/linux"
+          mkdir -p "$stage"
+          cp bin/Linux/WowClient64 "$stage/"
+          cp docs/port/tester/LEEME.txt "$stage/"
+          cp docs/port/tester/run-wow.sh "$stage/"
+          chmod 0755 "$stage/WowClient64" "$stage/run-wow.sh"
+          test -x "$stage/WowClient64"
+          test -x "$stage/run-wow.sh"
+          tar czf wowdecomp-linux-x86_64.tar.gz -C "$stage" WowClient64 LEEME.txt run-wow.sh
+          tar tvzf wowdecomp-linux-x86_64.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
           name: package-linux-x64
           path: wowdecomp-linux-x86_64.tar.gz
+
+  arch-verify:
+    needs: linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-linux-x64
+          path: dist
+
+      - name: Probar el paquete en archlinux:latest
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/dist:/dist:ro" archlinux:latest bash -c '
+            set -euo pipefail
+            pacman -Sy --noconfirm >/dev/null
+            pacman -S --noconfirm --needed \
+              sdl3 alsa-lib curl wayland libxkbcommon xvidcore \
+              vulkan-icd-loader vulkan-tools pipewire-alsa >/dev/null
+
+            mkdir -p /pkg
+            tar xzf /dist/wowdecomp-linux-x86_64.tar.gz -C /pkg
+            test -x /pkg/WowClient64
+            test -f /pkg/LEEME.txt
+            test -x /pkg/run-wow.sh
+
+            cd /pkg
+            echo "=== glibc de Arch ==="
+            ldd --version | head -1
+
+            echo "=== dependencias sin resolver ==="
+            if ldd ./WowClient64 | grep "not found"; then
+              echo "ERROR: faltan dependencias en Arch"
+              exit 1
+            fi
+            echo "(ninguna)"
+
+            echo "=== arranque sin datos: debe dar un error claro, no SIGABRT ==="
+            set +e
+            timeout 60 ./WowClient64 -datadir /pkg -windowed > /tmp/run.log 2>&1
+            code=$?
+            set -e
+            cat /tmp/run.log
+            echo "exit=$code"
+            test "$code" -ne 134
+            grep -q "Missing or corrupted data" /tmp/run.log
+            echo "OK: paquete valido en Arch y error de datos claro"
+          '
 
   windows-x64:
     runs-on: windows-latest
@@ -74,8 +144,9 @@ jobs:
       always() &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/port/linux' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') &&
       needs.linux-x64.result == 'success' &&
+      needs.arch-verify.result == 'success' &&
       needs.windows-x64.result == 'success'
-    needs: [linux-x64, windows-x64]
+    needs: [linux-x64, arch-verify, windows-x64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +167,11 @@ jobs:
 
           Requisitos: tu propio cliente **WoW 3.3.5a (12340)**. Coloca su carpeta `Data` junto al binario, o arranca con `-datadir /ruta/al/cliente`. Apunta `Data/<locale>/realmlist.wtf` a tu servidor. Este build trae las verificaciones de firma desactivadas: la data moddeada de servidores privados (parches custom) carga tal cual.
 
-          Verificado por el mantenedor: login, mundo, cámara (click derecho + arrastre), redimensionado de ventana y conexión a servidor — bajo WSL/Dozen. **Linux nativo aún no ha sido verificado por nosotros: este alpha ES la prueba.** En nativo con drivers Vulkan reales se espera rendimiento de clase Windows; en WSL va degradado (~20 FPS, ver `docs/port/WSL_RUNBOOK.md` en el repo).
+          **Arch Linux (nativo):** guía paso a paso en [`docs/port/ARCH_GUIDE.md`](https://github.com/Kevinmoth/wotlk-linux/blob/port/linux/docs/port/ARCH_GUIDE.md). Dependencias: `sdl3 alsa-lib curl wayland libxkbcommon xvidcore vulkan-icd-loader vulkan-tools pipewire-alsa` + el driver Vulkan de tu GPU (`vulkan-radeon`, `vulkan-intel`, `nvidia-utils` o `vulkan-nouveau`). El tarball incluye `LEEME.txt` y `run-wow.sh`, que comprueba Vulkan y `Data/` antes de arrancar.
+
+          **Ojo con las mayúsculas:** Linux distingue `Data` de `data`, y `common.MPQ` de `common.mpq`. Si copiaste los datos desde Windows, revisá los nombres.
+
+          Verificado por el mantenedor: login, mundo, cámara (click derecho + arrastre), redimensionado de ventana y conexión a servidor — bajo WSL/Dozen. El paquete Linux se verifica en `archlinux:latest` en cada push (dependencias resueltas y error de datos claro). **Falta la validación con GPU Vulkan real en nativo: este alpha ES la prueba.** En nativo con drivers Vulkan reales se espera rendimiento de clase Windows; en WSL va degradado (~20 FPS, ver `docs/port/WSL_RUNBOOK.md` en el repo).
 
           Incidencias conocidas en `docs/port/KNOWN_ISSUES_VULKAN.md`. Reporta bugs en los issues de este repositorio. Créditos: [SatyPardus/wowdecomp](https://github.com/SatyPardus/wowdecomp) (la decompilación) y [RosemyneH](https://github.com/RosemyneH) (gran parte del port).
 

@@ -1,0 +1,73 @@
+World of Warcraft 3.3.5a - build Linux (alpha)
+==============================================
+
+Este paquete SOLO trae el cliente. NO trae los datos del juego:
+necesitas tu propia carpeta Data de WoW 3.3.5a (build 12340).
+
+Inicio rapido
+-------------
+
+1) Instala las dependencias (Arch Linux):
+
+   sudo pacman -S --needed sdl3 alsa-lib curl wayland libxkbcommon xvidcore \
+                        vulkan-icd-loader vulkan-tools pipewire-alsa
+
+   Y el driver Vulkan de tu GPU:
+     AMD     -> sudo pacman -S vulkan-radeon
+     Intel   -> sudo pacman -S vulkan-intel
+     NVIDIA  -> sudo pacman -S nvidia-utils
+     Nouveau -> sudo pacman -S vulkan-nouveau
+
+2) Comprueba Vulkan:
+
+   vulkaninfo --summary
+
+   Debe listar una GPU. Si dice "Found no drivers!", falta el driver.
+
+3) Copia tu carpeta Data junto a este archivo:
+
+   Data/common.MPQ
+   Data/common-2.MPQ
+   Data/expansion.MPQ
+   Data/lichking.MPQ
+   Data/enUS/locale-enUS.MPQ
+   Data/enUS/realmlist.wtf   (con: set realmlist tu.servidor)
+
+   IMPORTANTE: Linux distingue mayusculas. "Data", "common.MPQ" y "enUS"
+   deben estar escritos exactamente asi. Si vienen de un disco Windows,
+   revisa que no se hayan convertido a minusculas.
+
+4) Arranca:
+
+   ./run-wow.sh
+
+   o:
+
+   ./WowClient64 -windowed
+
+   Si los datos estan en otra carpeta:
+
+   ./WowClient64 -datadir /ruta/a/tu/cliente -windowed
+
+Donde se guarda todo
+--------------------
+
+  WTF/     -> junto a los datos (o al -datadir)
+  Cache/   -> junto a los datos (o al -datadir)
+  Errors/  -> junto al ejecutable WowClient64
+
+Problemas
+---------
+
+Guia completa y solucion de problemas:
+  https://github.com/Kevinmoth/wotlk-linux/blob/port/linux/docs/port/ARCH_GUIDE.md
+
+Reporta bugs en:
+  https://github.com/Kevinmoth/wotlk-linux/issues
+
+Incluye siempre:
+  - salida completa de la terminal
+  - vulkaninfo --summary
+  - ldd ./WowClient64
+  - ldd --version | head -1
+  - GPU y sesion (X11 o Wayland)

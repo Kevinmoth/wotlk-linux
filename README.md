@@ -92,6 +92,20 @@ Notas:
 - Gamepad conectado activo por defecto (`Joystick 1`), con el layout de retail.
 - Servidor local de pruebas: `Tools/local-server/start-docker.sh` (AzerothCore via Docker).
 
+### Probar un release precompilado (Arch Linux)
+
+Guía completa para testers: **[`docs/port/ARCH_GUIDE.md`](docs/port/ARCH_GUIDE.md)**.
+
+```bash
+sudo pacman -S --needed sdl3 alsa-lib curl wayland libxkbcommon xvidcore \
+                     vulkan-icd-loader vulkan-tools pipewire-alsa
+sudo pacman -S --needed vulkan-radeon   # o vulkan-intel / nvidia-utils / vulkan-nouveau
+vulkaninfo --summary                    # debe listar una GPU
+./run-wow.sh                            # o: ./WowClient64 -windowed
+```
+
+El tarball del release incluye `WowClient64`, `LEEME.txt` y `run-wow.sh`. Linux es sensible a mayúsculas: `Data`, `common.MPQ` y `enUS` deben conservar la forma canónica. `WTF/` y `Cache/` se escriben en el `-datadir`; `Errors/` junto al ejecutable.
+
 ## Estructura (relevante)
 
 | Ruta | Contenido |

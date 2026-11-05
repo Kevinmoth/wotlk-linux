@@ -433,6 +433,7 @@ void ConsoleDeviceInitialize(const char* title, bool unused_a2, bool unused_a3) 
 
                 Startup_StringsRec* titleRec = g_startup_StringsDB.GetRecord(1);
                 const char* caption = titleRec ? titleRec->m_message : "World of Warcraft";
+                char messageBuffer[768];
                 const char* message;
 
                 if (api == GxApi_D3d9 || api == GxApi_D3d9Ex) {
@@ -440,12 +441,25 @@ void ConsoleDeviceInitialize(const char* title, bool unused_a2, bool unused_a3) 
                     message = rec ? rec->m_message : "World of Warcraft was unable to start up 3D acceleration. Please make sure DirectX 9.0c is installed and your video drivers are up-to-date.";
                 } else {
                     Startup_StringsRec* rec = g_startup_StringsDB.GetRecord(3);
-                    message = rec ? rec->m_message : "World of Warcraft was unable to start up 3D acceleration.";
+                    const char* base = rec ? rec->m_message : "World of Warcraft was unable to start up 3D acceleration.";
+#if defined(__linux__)
+                    const char* hint =
+                        "Vulkan is not available. Install the loader and the driver for your GPU:\n"
+                        "  sudo pacman -S vulkan-icd-loader vulkan-radeon   (AMD)\n"
+                        "  sudo pacman -S vulkan-icd-loader vulkan-intel    (Intel)\n"
+                        "  sudo pacman -S vulkan-icd-loader nvidia-utils    (NVIDIA)\n"
+                        "Then verify with: vulkaninfo --summary";
+#else
+                    const char* hint = "Vulkan is not available. Make sure your Vulkan driver is installed and up to date.";
+#endif
+                    SStrPrintf(messageBuffer, sizeof(messageBuffer), "%s\n\n%s", base, hint);
+                    message = messageBuffer;
                 }
 
+                std::fprintf(stderr, "graphics: %s\n", message);
                 OsGuiMessageBox(nullptr, 0, message, caption);
                 GxLogClose();
-                exit(0);
+                exit(1);
             }
 
             format = s_desktopFormat;
