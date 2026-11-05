@@ -94,7 +94,7 @@ jobs:
 
             cd /pkg
             echo "=== glibc de Arch ==="
-            ldd --version | head -1
+            ldd --version 2>&1 | sed -n '1p'
 
             echo "=== dependencias sin resolver ==="
             if ldd ./WowClient64 | grep "not found"; then
